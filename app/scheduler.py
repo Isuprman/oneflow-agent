@@ -73,6 +73,7 @@ async def _execute_task(db, task: ScheduledTask) -> None:
     """执行一条到期任务：在用户的「定时播报」会话里跑 agent，产出通知。
 
     调用前 tick 已推进 next_run_at/enabled，此处只管执行与播报。
+    失败分类：LLM 类错误转人话并标 system_error（前端只展示不播报），其余照常播报。
     """
     from .agent.engine import run_agent
 
@@ -96,14 +97,58 @@ async def _execute_task(db, task: ScheduledTask) -> None:
     except Exception as e:  # 任务失败也要告知用户，而不是静默吞掉
         reply = f"定时任务执行失败: {e}"
 
+    friendly = _friendly_llm_error(reply)
+    if friendly is not None:
+        content = f"先生，定时任务「{task.title or '未命名'}」未能完成：{friendly}"
+        kind = "system_error"
+    else:
+        content = reply
+        kind = "task"
     db.add(
         Notification(
             user_id=user.id,
             title=task.title or "定时任务",
-            content=reply,
-            kind="task",
+            content=content,
+            kind=kind,
         )
     )
+    db.commit()
+
+
+def _friendly_llm_error(reply: str) -> str | None:
+    """识别 LLM 类失败并转成可操作的人话；非 LLM 错误返回 None。"""
+    if not reply:
+        return None
+    if reply.startswith("LLM 调用出错"):
+        return "模型服务暂时不可用（可能是密钥失效或网络异常），请在设置页检查 LLM 配置。"
+    if "LLM 未配置" in reply:
+        return "尚未配置 LLM 密钥，请在设置页填写后重试。"
+    return None
+
+
+def notify_system_error(db, message: str) -> None:
+    """系统异常通知：每天最多一条，避免持续出错时刷屏。
+
+    注意：模型 created_at 存的是 UTC（models.now），比较基准也用 UTC 零点。
+    """
+    utc_day_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    already = (
+        db.query(Notification)
+        .filter(Notification.kind == "system_error", Notification.created_at >= utc_day_start)
+        .count()
+    )
+    if already > 0:
+        return
+    # 系统级错误无明确归属用户：发给全部用户（单人部署场景下即本人）
+    for user in db.query(User).all():
+        db.add(
+            Notification(
+                user_id=user.id,
+                title="系统自检",
+                content=f"先生，后台服务出现异常：{message}",
+                kind="system_error",
+            )
+        )
     db.commit()
 
 
@@ -136,33 +181,45 @@ async def tick() -> None:
 
         window_end = now + timedelta(minutes=REMINDER_WINDOW_MINUTES)
         late_limit = now - timedelta(minutes=REMINDER_LATE_MINUTES)
-        events = (
-            db.query(Schedule)
-            .filter(
-                Schedule.notified == 0,
-                Schedule.start_at >= late_limit,
-                Schedule.start_at <= window_end,
-            )
-            .all()
-        )
-        for event in events:
-            db.add(
-                Notification(
-                    user_id=event.user_id,
-                    title="日程提醒",
-                    content=f"{event.start_at:%H:%M} 您有日程：{event.title}",
-                    kind="reminder",
+        try:
+            events = (
+                db.query(Schedule)
+                .filter(
+                    Schedule.notified == 0,
+                    Schedule.start_at >= late_limit,
+                    Schedule.start_at <= window_end,
                 )
+                .all()
             )
-            event.notified = 1
-        if events:
-            db.commit()
+            for event in events:
+                db.add(
+                    Notification(
+                        user_id=event.user_id,
+                        title="日程提醒",
+                        content=f"{event.start_at:%H:%M} 您有日程：{event.title}",
+                        kind="reminder",
+                    )
+                )
+                event.notified = 1
+            if events:
+                db.commit()
+        except Exception as e:  # 单块失败不拖垮其他规则，异常当天自报一次
+            db.rollback()
+            notify_system_error(db, f"日程提醒检查失败（{e}）")
 
         # 每晚 20 点后：情景关怀（每人每天一次）；21 点后：习惯洞察
         if now.hour >= CARE_HOUR:
-            run_care_rules(db, now)
+            try:
+                run_care_rules(db, now)
+            except Exception as e:
+                db.rollback()
+                notify_system_error(db, f"情景关怀检查失败（{e}）")
         if now.hour >= HABIT_INSIGHT_HOUR:
-            run_habit_insights(db, now)
+            try:
+                run_habit_insights(db, now)
+            except Exception as e:
+                db.rollback()
+                notify_system_error(db, f"习惯洞察失败（{e}）")
     finally:
         db.close()
 

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { MotionConfig, AnimatePresence, motion, type Variants } from 'framer-motion'
-import { createConversation, getMessages, listConversations, listNotifications, markNotificationRead, streamChat, tts, type StreamStep } from '../api/client'
+import { createConversation, getMessages, getIdleHint, listConversations, listNotifications, markNotificationRead, streamChat, tts, type StreamStep } from '../api/client'
 import type { Conversation, Message, ToolStep } from '../api/types'
 import AiCore, { type ReactiveLevel } from '../components/AiCore'
 import ParticleField from '../components/ParticleField'
@@ -70,6 +70,9 @@ export default function ChatPage() {
   // 忙闲标记（供通知轮询判断是否顺延，避免播报撞车）
   const sendingRef = useRef(false)
   const voiceLiveRef = useRef(false)
+  // 闲置轻推：最近一次交互时间 + 本会话搭话次数（频控上限 2）
+  const lastInteractionRef = useRef(Date.now())
+  const chatterCountRef = useRef(0)
   const [trayOpen, setTrayOpen] = useState(false)
   const [voiceLive, setVoiceLive] = useState(false)
   const [corePulse, setCorePulse] = useState(0)
@@ -178,6 +181,7 @@ export default function ChatPage() {
     const text = rawText.trim()
     if (!text || sending) return
     clearToast()
+    lastInteractionRef.current = Date.now()
     setInput(''); setSending(true); sendingRef.current = true; setError('')
     // 右上角「OPERATOR + 内容」只显示一次，~2s 自动消失；不再进左侧时间线
     setEcho(text)
@@ -220,6 +224,7 @@ export default function ChatPage() {
   }, [activeId, sending, clearToast, showToast, speakReply])
 
   const handleWake = useCallback((command: string) => {
+    lastInteractionRef.current = Date.now()
     setWakeStatus('已唤醒'); stopAudio(); stopSpeaking(); setSpeakGuard(false); playWakeTone()
     const text = command.trim()
     if (text) { doSend(text); return }
@@ -322,23 +327,47 @@ export default function ChatPage() {
           }
         }
       }
+      lastInteractionRef.current = Date.now()
       const display = list.length === 1
         ? `【${latest.title}】${toPlainText(latest.content)}`
         : `【${latest.title}】等 ${list.length} 条新通知`
       setJarvisEcho(display)
       if (jarvisEchoTimerRef.current) window.clearTimeout(jarvisEchoTimerRef.current)
       jarvisEchoTimerRef.current = window.setTimeout(() => setJarvisEcho(null), 6000)
-      // 多条合并成一段播报，避免多次起停音频
-      const speakText = list
-        .map((note) => `${note.title}：${toPlainText(note.content)}`)
-        .join('。')
-        .slice(0, 500)
-      speakReply(speakText)
+      // 多条合并成一段播报；system_error 类只展示不播报（避免 TTS 读报错详情）
+      const speakable = list.filter((note) => note.kind !== 'system_error')
+      if (speakable.length > 0) {
+        const speakText = speakable
+          .map((note) => `${note.title}：${toPlainText(note.content)}`)
+          .join('。')
+          .slice(0, 500)
+        speakReply(speakText)
+      }
       for (const note of list) void markNotificationRead(note.id)
     }
     void poll()
     const timer = window.setInterval(() => void poll(), 15000)
     return () => { cancelled = true; window.clearInterval(timer) }
+  }, [speakReply])
+
+  // 闲置轻推：长时间无交互时贾维斯主动说一句（每会话最多 2 次，宁缺毋滥）
+  useEffect(() => {
+    const IDLE_MS = 20 * 60 * 1000
+    const timer = window.setInterval(async () => {
+      if (!getPrefs().chitchat) return
+      if (sendingRef.current || voiceLiveRef.current || !standbyOnRef.current) return
+      if (chatterCountRef.current >= 2) return
+      if (Date.now() - lastInteractionRef.current < IDLE_MS) return
+      const hint = await getIdleHint()
+      if (!hint || !hint.text || chatterCountRef.current >= 2) return
+      chatterCountRef.current += 1
+      lastInteractionRef.current = Date.now()
+      setJarvisEcho(hint.text)
+      if (jarvisEchoTimerRef.current) window.clearTimeout(jarvisEchoTimerRef.current)
+      jarvisEchoTimerRef.current = window.setTimeout(() => setJarvisEcho(null), 6000)
+      speakReply(hint.text)
+    }, 60000)
+    return () => window.clearInterval(timer)
   }, [speakReply])
 
   const newChat = async () => { setError(''); try { const conversation = await createConversation(); setConversations((previous) => [conversation, ...previous.filter((item) => item.id !== conversation.id)]); setActiveId(conversation.id); setMessages([]); setInput(''); setExpandedTraces(new Set()) } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)) } }

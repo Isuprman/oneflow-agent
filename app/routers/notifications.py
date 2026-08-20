@@ -51,3 +51,21 @@ def mark_read(
         raise HTTPException(status_code=404, detail="通知不存在")
     note.read = 1
     db.commit()
+
+
+@router.delete("/{notification_id}", status_code=204)
+def delete_notification(
+    notification_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """删除一条通知（通知中心用）；不存在或不属于当前用户返回 404。"""
+    note = (
+        db.query(Notification)
+        .filter(Notification.id == notification_id, Notification.user_id == current_user.id)
+        .first()
+    )
+    if note is None:
+        raise HTTPException(status_code=404, detail="通知不存在")
+    db.delete(note)
+    db.commit()

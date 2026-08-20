@@ -57,5 +57,23 @@ def test_mark_read_missing_404(client):
     assert client.post("/api/notifications/99999/read", headers=headers).status_code == 404
 
 
+def test_delete_notification(client, db_session):
+    headers = _register_and_login(client, username="notif_del")
+    note_id = _seed_notification(db_session, "notif_del", "待删除", "内容")
+
+    assert client.delete(f"/api/notifications/{note_id}", headers=headers).status_code == 204
+    # 历史列表已清空
+    assert client.get("/api/notifications?unread=false", headers=headers).json() == []
+    # 重复删除 404；他人通知不可删
+    assert client.delete(f"/api/notifications/{note_id}", headers=headers).status_code == 404
+
+
+def test_delete_other_user_notification_404(client, db_session):
+    _register_and_login(client, username="notif_owner2")
+    headers_b = _register_and_login(client, username="notif_guest2")
+    note_id = _seed_notification(db_session, "notif_owner2", "私密", "只给 owner")
+    assert client.delete(f"/api/notifications/{note_id}", headers=headers_b).status_code == 404
+
+
 def test_notifications_unauthed_401(client):
     assert client.get("/api/notifications").status_code == 401
