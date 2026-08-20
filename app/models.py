@@ -138,6 +138,40 @@ class UserMemory(Base):
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     content = Column(Text, nullable=False)
+    embedding = Column(Text)                     # JSON 向量（云端 embedding），语义召回用
     created_at = Column(DateTime, default=now)
     updated_at = Column(DateTime, default=now, onupdate=now)
     user = relationship("User", back_populates="memories")
+
+
+class UserProfile(Base):
+    """结构化用户画像：城市/称呼等，供简报与播报做个性化上下文。"""
+    __tablename__ = "user_profiles"
+    __table_args__ = (UniqueConstraint("user_id", "key", name="uq_user_profile"),)
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    key = Column(String(64), nullable=False)
+    value = Column(Text, default="")
+
+
+class CustomAgent(Base):
+    """用户自定义子智能体：人设 + 工具白名单，delegate 动态路由。"""
+    __tablename__ = "custom_agents"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    name = Column(String(32), nullable=False)
+    persona = Column(Text, nullable=False)
+    tools = Column(Text, nullable=False)         # JSON 数组：允许的工具名
+    created_at = Column(DateTime, default=now)
+
+
+class PendingAction(Base):
+    """高危操作待确认：engine 遇到需确认工具时暂存，等用户确认后再执行。"""
+    __tablename__ = "pending_actions"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    conversation_id = Column(Integer, ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False)
+    tool_name = Column(String(64), nullable=False)
+    arguments = Column(Text, nullable=False)     # JSON
+    summary = Column(Text, nullable=False)       # 给用户看的确认描述
+    created_at = Column(DateTime, default=now)

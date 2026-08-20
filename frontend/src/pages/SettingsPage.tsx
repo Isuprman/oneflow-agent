@@ -6,6 +6,7 @@ import ParticleField from '../components/ParticleField'
 import HudCorners from '../components/HudCorners'
 import { getPrefs, savePrefs, type VoicePrefs } from '../prefs'
 import { DEFAULT_LLM_BASE_URL, DEFAULT_LLM_MODEL, DEFAULT_LLM_PROVIDER, LLM_PROVIDERS } from '../theme/llmModels'
+import { TTS_VOICES } from '../theme/ttsVoices'
 
 const PREF_ITEMS: Array<{ key: keyof VoicePrefs; label: string; desc: string }> = [
   { key: 'standby', label: '待命监听', desc: '唤醒词：贾维斯、小翼、你好小助手（同音字也能唤醒）；切换后返回聊天页生效' },
@@ -108,6 +109,11 @@ export default function SettingsPage() {
   }
   const togglePref = (key: keyof VoicePrefs) => {
     const next: VoicePrefs = { ...prefs, [key]: !prefs[key] }
+    setPrefs(next)
+    savePrefs(next)
+  }
+  const changeTtsVoice = (voiceId: string) => {
+    const next: VoicePrefs = { ...prefs, ttsVoice: voiceId }
     setPrefs(next)
     savePrefs(next)
   }
@@ -289,6 +295,22 @@ export default function SettingsPage() {
                 {savingBriefing ? '保存中…' : briefing.enabled ? '关闭' : '开启'}
               </button>
             </div>
+          </div>
+          {/* 播报音色：edge-tts 中文音色任选，管家气质自选 */}
+          <div className="toggle-chip" style={{ cursor: 'default' }}>
+            <span className="toggle-chip__body">
+              <span className="toggle-chip__label">播报音色</span>
+              <span className="toggle-chip__desc">{TTS_VOICES.find((v) => v.id === prefs.ttsVoice)?.desc ?? '默认音色'}</span>
+            </span>
+            <select
+              aria-label="播报音色"
+              value={prefs.ttsVoice}
+              onChange={(event) => changeTtsVoice(event.target.value)}
+            >
+              {TTS_VOICES.map((voice) => (
+                <option key={voice.id} value={voice.id}>{voice.label}</option>
+              ))}
+            </select>
           </div>
           {briefingMessage && <p className="success-note">{briefingMessage}</p>}
         </section>

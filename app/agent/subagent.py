@@ -4,7 +4,6 @@ import json
 from ..config import settings
 from ..tools.registry import execute, schemas
 from . import llm as llm_mod
-
 # 子智能体配置：agent_name -> system 人设 + 允许使用的工具
 SUB_AGENTS = {
     "life": {
@@ -22,10 +21,30 @@ SUB_AGENTS = {
 }
 
 
-def _sub_schemas(agent_name: str) -> list:
-    """从全局工具 schemas() 里筛出该子智能体允许的工具 schema 列表。"""
-    allowed = set(SUB_AGENTS[agent_name]["tools"])
+def _sub_schemas(tool_names: list[str]) -> list:
+    """从全局工具 schemas() 里筛出指定工具白名单的 schema 列表。"""
+    allowed = set(tool_names)
     return [s for s in schemas() if s["function"]["name"] in allowed]
+
+
+def resolve_agent(db, user_id: int, agent_name: str) -> dict | None:
+    """解析子智能体：内置优先，其次查该用户的自定义；不存在返回 None。"""
+    if agent_name in SUB_AGENTS:
+        return SUB_AGENTS[agent_name]
+    from ..models import CustomAgent
+
+    row = (
+        db.query(CustomAgent)
+        .filter(CustomAgent.user_id == user_id, CustomAgent.name == agent_name)
+        .first()
+    )
+    if row is None:
+        return None
+    try:
+        tools = json.loads(row.tools or "[]")
+    except ValueError:
+        tools = []
+    return {"system": row.persona, "tools": tools}
 
 
 async def run_subagent(db, user, agent_name: str, instruction: str, cfg) -> tuple[str, int]:
@@ -33,11 +52,12 @@ async def run_subagent(db, user, agent_name: str, instruction: str, cfg) -> tupl
 
     agent_name 未知时抛 ValueError；步数超限时返回失败提示文本。
     """
-    if agent_name not in SUB_AGENTS:
+    agent = resolve_agent(db, user.id, agent_name)
+    if agent is None:
         raise ValueError("未知子智能体: " + agent_name)
 
-    sub_tools = _sub_schemas(agent_name)
-    system = SUB_AGENTS[agent_name]["system"]
+    sub_tools = _sub_schemas(agent["tools"])
+    system = agent["system"]
     messages = [{"role": "user", "content": instruction}]
 
     max_sub_steps = min(settings.max_steps, 5)

@@ -34,11 +34,23 @@ def _migrate_schedules_notified() -> None:
             conn.execute(text("ALTER TABLE schedules ADD COLUMN notified INTEGER DEFAULT 0"))
 
 
+def _migrate_user_memories_embedding() -> None:
+    """老库补齐 user_memories.embedding 列：语义召回的向量存储。"""
+    inspector = inspect(engine)
+    if "user_memories" not in inspector.get_table_names():
+        return
+    columns = {c["name"] for c in inspector.get_columns("user_memories")}
+    if "embedding" not in columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE user_memories ADD COLUMN embedding TEXT"))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
     _migrate_messages_reasoning()
     _migrate_schedules_notified()
+    _migrate_user_memories_embedding()
     # 后台调度引擎：定时任务执行 + 日程到期提醒（测试环境不启动，避免干扰）
     import sys
 

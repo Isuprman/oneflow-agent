@@ -231,6 +231,15 @@ button:disabled { cursor: not-allowed; }
 .dock-send__busy { width: 13px; height: 13px; border: 2px solid rgba(7,19,29,.4); border-top-color: #07131d; border-radius: 50%; animation: spin 0.8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
+/* ---- 高危操作确认条 ---- */
+.confirm-bar { position: fixed; left: 50%; bottom: 132px; transform: translateX(-50%); z-index: 46; display: flex; align-items: center; gap: 12px; max-width: min(680px, calc(100vw - 48px)); padding: 10px 14px; border: 1px solid rgba(251,191,36,.5); border-radius: 12px; background: rgba(15,17,10,.82); backdrop-filter: blur(14px); box-shadow: 0 0 24px rgba(251,191,36,.18); animation: confirm-in .22s ease-out; }
+@keyframes confirm-in { from { opacity: 0; transform: translate(-50%, 8px); } to { opacity: 1; transform: translate(-50%, 0); } }
+.confirm-bar__text { flex: 1; min-width: 0; color: #fde68a; font-size: 12.5px; letter-spacing: .03em; line-height: 1.5; }
+.confirm-bar__btn { flex: none; padding: 7px 14px; border: 1px solid rgba(125,211,252,.35); border-radius: 8px; background: rgba(3,11,21,.6); color: #bce9fa; font-size: 12px; letter-spacing: .08em; cursor: pointer; transition: border-color 160ms ease-out, background-color 160ms ease-out; }
+.confirm-bar__btn:hover { border-color: rgba(56,189,248,.7); background: rgba(56,189,248,.1); }
+.confirm-bar__btn--ok { border-color: rgba(251,191,36,.65); color: #fde68a; }
+.confirm-bar__btn--ok:hover { border-color: #fbbf24; background: rgba(251,191,36,.12); }
+
 /* ---- 响应式 ---- */
 @media (max-width: 860px) {
   .telemetry-rail { display: none; }

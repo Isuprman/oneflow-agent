@@ -70,6 +70,8 @@ async def chat_stream(
                 await queue.put(_sse("delta", {"text": event["text"]}))
             elif kind == "error":
                 await queue.put(_sse("error", {"message": event["message"]}))
+            elif kind == "confirm":
+                await queue.put(_sse("confirm", {"tool": event["tool"], "summary": event["summary"]}))
 
         task = asyncio.create_task(
             run_agent(db, user, conv_id, body.message, on_event=on_event, stream=True)
