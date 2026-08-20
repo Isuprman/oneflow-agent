@@ -6,10 +6,13 @@ import type {
   Conversation,
   HotelConfig,
   HotelConfigIn,
+  IdleHint,
   LlmConfig,
   LlmConfigIn,
   Memory,
   Message,
+  TaskInfo,
+  TaskUpdateIn,
   ToolStep,
   TokenOut,
   UserOut,
@@ -256,10 +259,10 @@ export async function deleteMemory(id: number): Promise<void> {
   }
 }
 
-/** 拉取未读主动通知（定时任务播报/日程提醒），最新在前。 */
-export async function listNotifications(): Promise<AppNotification[]> {
+/** 拉取主动通知（默认仅未读；unreadOnly=false 拉全部历史），最新在前。 */
+export async function listNotifications(unreadOnly = true): Promise<AppNotification[]> {
   try {
-    const resp = await http.get('/notifications')
+    const resp = await http.get('/notifications', { params: { unread: unreadOnly } })
     return resp.data as AppNotification[]
   } catch {
     // 轮询场景：网络抖动静默返回空，下一轮重试
@@ -290,6 +293,50 @@ export async function saveBriefing(data: BriefingConfig): Promise<BriefingConfig
     return resp.data as BriefingConfig
   } catch (error) {
     throw new Error(getErrorMessage(error))
+  }
+}
+
+export async function deleteNotification(id: number): Promise<void> {
+  try {
+    await http.delete(`/notifications/${id}`)
+  } catch {
+    // 删除失败静默，下一轮刷新自然对齐
+  }
+}
+
+export async function listTasks(): Promise<TaskInfo[]> {
+  try {
+    const resp = await http.get('/tasks')
+    return resp.data as TaskInfo[]
+  } catch (error) {
+    throw new Error(getErrorMessage(error))
+  }
+}
+
+export async function updateTask(id: number, data: TaskUpdateIn): Promise<TaskInfo> {
+  try {
+    const resp = await http.put(`/tasks/${id}`, data)
+    return resp.data as TaskInfo
+  } catch (error) {
+    throw new Error(getErrorMessage(error))
+  }
+}
+
+export async function deleteTask(id: number): Promise<void> {
+  try {
+    await http.delete(`/tasks/${id}`)
+  } catch (error) {
+    throw new Error(getErrorMessage(error))
+  }
+}
+
+/** 闲置轻推话题：无话可说时返回 {topic: null, text: null}。 */
+export async function getIdleHint(): Promise<IdleHint | null> {
+  try {
+    const resp = await http.get('/idle-hint')
+    return resp.data as IdleHint
+  } catch {
+    return null
   }
 }
 

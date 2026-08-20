@@ -85,3 +85,26 @@ export interface BriefingConfig {
   hour: number
   minute: number
 }
+
+export interface TaskInfo {
+  id: number
+  title: string
+  kind: string
+  kind_label: string
+  hour: number
+  minute: number
+  weekday: number | null
+  next_run_at: string | null
+  enabled: boolean
+}
+
+export interface TaskUpdateIn {
+  enabled?: boolean
+  hour?: number
+  minute?: number
+}
+
+export interface IdleHint {
+  topic: string | null
+  text: string | null
+}

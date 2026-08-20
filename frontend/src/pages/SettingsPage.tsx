@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { deleteMemory, getBriefing, getHotelConfig, getLlmConfig, listMemories, saveBriefing, saveHotelConfig, saveLlmConfig } from '../api/client'
-import type { BriefingConfig, HotelConfig, LlmConfig, Memory } from '../api/types'
+import { deleteMemory, deleteNotification, deleteTask, getBriefing, getHotelConfig, getLlmConfig, listMemories, listNotifications, listTasks, saveBriefing, saveHotelConfig, saveLlmConfig, updateTask } from '../api/client'
+import type { AppNotification, BriefingConfig, HotelConfig, LlmConfig, Memory, TaskInfo } from '../api/types'
 import ParticleField from '../components/ParticleField'
 import HudCorners from '../components/HudCorners'
 import { getPrefs, savePrefs, type VoicePrefs } from '../prefs'
@@ -11,9 +11,20 @@ import { TTS_VOICES } from '../theme/ttsVoices'
 const PREF_ITEMS: Array<{ key: keyof VoicePrefs; label: string; desc: string }> = [
   { key: 'standby', label: '待命监听', desc: '唤醒词：贾维斯、小翼、你好小助手（同音字也能唤醒）；切换后返回聊天页生效' },
   { key: 'voice', label: '默认语音播报', desc: '助手回复自动朗读' },
+  { key: 'chitchat', label: '主动搭话', desc: '闲置很久时贾维斯偶尔主动说一句（每次会话最多 2 次）' },
   { key: 'audioDrive', label: '声音驱动', desc: '3D 核心随你的音量形变' },
   { key: 'showInput', label: '显示输入框', desc: '默认关；开=聊天页出现打字框' },
 ]
+
+// 通知类型 → 中文标签
+const NOTE_KIND_LABELS: Record<string, string> = {
+  task: '定时播报',
+  reminder: '日程提醒',
+  care: '情景关怀',
+  habit: '习惯洞察',
+  system_error: '系统自检',
+}
+const WEEKDAY_LABELS = ['', '周一', '周二', '周三', '周四', '周五', '周六', '周日']
 
 export default function SettingsPage() {
   const [llmConfig, setLlmConfig] = useState<LlmConfig | null>(null)
@@ -39,6 +50,11 @@ export default function SettingsPage() {
   const [briefingTime, setBriefingTime] = useState('08:00')
   const [savingBriefing, setSavingBriefing] = useState(false)
   const [briefingMessage, setBriefingMessage] = useState('')
+  // 定时任务管理（不含晨间简报，它有专属开关）
+  const [tasks, setTasks] = useState<TaskInfo[]>([])
+  const [taskError, setTaskError] = useState('')
+  // 通知中心（历史全量）
+  const [notes, setNotes] = useState<AppNotification[]>([])
 
   useEffect(() => {
     getLlmConfig()
@@ -62,6 +78,8 @@ export default function SettingsPage() {
         setBriefingTime(`${String(config.hour).padStart(2, '0')}:${String(config.minute).padStart(2, '0')}`)
       })
       .catch(() => {})
+    listTasks().then(setTasks).catch((reason: unknown) => setTaskError(reason instanceof Error ? reason.message : String(reason)))
+    listNotifications(false).then(setNotes)
   }, [])
 
   const selectProvider = (next: string) => {
@@ -129,6 +147,32 @@ export default function SettingsPage() {
     } finally {
       setSavingBriefing(false)
     }
+  }
+  const toggleTask = async (task: TaskInfo) => {
+    setTaskError('')
+    try {
+      const updated = await updateTask(task.id, { enabled: !task.enabled })
+      setTasks((previous) => previous.map((item) => (item.id === task.id ? updated : item)))
+    } catch (reason) {
+      setTaskError(reason instanceof Error ? reason.message : String(reason))
+    }
+  }
+  const removeTask = async (task: TaskInfo) => {
+    setTaskError('')
+    try {
+      await deleteTask(task.id)
+      setTasks((previous) => previous.filter((item) => item.id !== task.id))
+    } catch (reason) {
+      setTaskError(reason instanceof Error ? reason.message : String(reason))
+    }
+  }
+  const removeNote = async (id: number) => {
+    await deleteNotification(id)
+    setNotes((previous) => previous.filter((item) => item.id !== id))
+  }
+  const clearNotes = async () => {
+    for (const note of notes) await deleteNotification(note.id)
+    setNotes([])
   }
   const formatTime = (value: string) => {
     const date = new Date(value)
@@ -313,6 +357,86 @@ export default function SettingsPage() {
             </select>
           </div>
           {briefingMessage && <p className="success-note">{briefingMessage}</p>}
+        </section>
+
+        {/* 定时任务管理（晨间简报在上方专属开关，此处不重复展示） */}
+        <section className="section-card">
+          <HudCorners />
+          <header className="module-head">
+            <div>
+              <p className="module-head__kicker">SCHEDULED TASKS</p>
+              <h2>定时任务</h2>
+            </div>
+            <span className={`led ${tasks.some((task) => task.enabled) ? 'is-ready' : ''}`} aria-hidden="true" />
+          </header>
+          <p className="section-description">到点后自动执行并主动播报的任务；也可以直接对贾维斯说“取消某某任务”。</p>
+
+          {taskError && <p className="error-note" role="alert">{taskError}</p>}
+          {tasks.length === 0 ? (
+            <p className="empty-copy">暂无定时任务。试着对贾维斯说：“每天晚上9点提醒我喝水”。</p>
+          ) : (
+            <div className="toggle-list">
+              {tasks.map((task) => (
+                <div key={task.id} className="toggle-chip">
+                  <span className="toggle-chip__body">
+                    <span className="toggle-chip__label">{task.title}</span>
+                    <span className="toggle-chip__desc">
+                      {task.kind_label}
+                      {task.kind === 'weekly' && task.weekday ? ` ${WEEKDAY_LABELS[task.weekday]}` : ''}
+                      {` ${String(task.hour).padStart(2, '0')}:${String(task.minute).padStart(2, '0')}`}
+                      {task.next_run_at ? ` · 下次：${formatTime(task.next_run_at)}` : ' · 已停用'}
+                    </span>
+                  </span>
+                  <button
+                    type="button"
+                    className={`toggle-chip ${task.enabled ? 'is-on' : ''}`}
+                    style={{ padding: '4px 10px' }}
+                    onClick={() => void toggleTask(task)}
+                  >
+                    <span className="toggle-chip__state">{task.enabled ? 'ON' : 'OFF'}</span>
+                  </button>
+                  <button type="button" className="outline-button" onClick={() => void removeTask(task)}>删除</button>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+
+        {/* 通知中心：贾维斯主动播报过的历史都可回看 */}
+        <section className="section-card">
+          <HudCorners />
+          <header className="module-head">
+            <div>
+              <p className="module-head__kicker">NOTIFICATION CENTER</p>
+              <h2>通知中心</h2>
+            </div>
+            <span className={`led ${notes.length > 0 ? 'is-ready' : ''}`} aria-hidden="true" />
+          </header>
+          <p className="section-description">定时播报、日程提醒、情景关怀与习惯洞察的历史记录。</p>
+
+          {notes.length === 0 ? (
+            <p className="empty-copy">暂无通知。</p>
+          ) : (
+            <>
+              <ul className="memory-list">
+                {notes.map((note) => (
+                  <li className="memory-row" key={note.id}>
+                    <div className="memory-row__copy">
+                      <p>
+                        <strong>[{NOTE_KIND_LABELS[note.kind] ?? note.kind}] {note.title}</strong>
+                        {' '}{note.content}
+                      </p>
+                      <time>{formatTime(note.created_at)}</time>
+                    </div>
+                    <button className="outline-button" onClick={() => void removeNote(note.id)}>删除</button>
+                  </li>
+                ))}
+              </ul>
+              <div className="save-bar">
+                <button className="outline-button" onClick={() => void clearNotes()}>清空全部</button>
+              </div>
+            </>
+          )}
         </section>
 
         {/* 长期记忆 */}

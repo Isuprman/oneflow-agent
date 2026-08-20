@@ -76,7 +76,7 @@ def health():
     return {"status": "ok", "llm_provider": settings.llm_provider, "llm_model": settings.llm_model}
 
 
-from .routers import auth, briefing, chat, chat_stream, conversations, memories, notifications, tts
+from .routers import auth, briefing, chat, chat_stream, conversations, idle_hint, memories, notifications, tasks, tts
 from .routers import settings as settings_router  # noqa: E402,F401
 
 app.include_router(auth.router)
@@ -88,3 +88,5 @@ app.include_router(tts.router)
 app.include_router(memories.router)
 app.include_router(notifications.router)
 app.include_router(briefing.router)
+app.include_router(tasks.router)
+app.include_router(idle_hint.router)
