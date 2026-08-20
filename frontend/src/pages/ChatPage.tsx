@@ -75,6 +75,8 @@ export default function ChatPage() {
   const [corePulse, setCorePulse] = useState(0)
   // 真流式：当前正在调用的工具名（执行完清空，驱动遥测状态）
   const [liveTool, setLiveTool] = useState('')
+  // 高危操作待确认（engine 暂存，等用户确认/取消）
+  const [pendingConfirm, setPendingConfirm] = useState<{ tool: string; summary: string } | null>(null)
   const [showInput] = useState(() => getPrefs().showInput)
   const [micAvailable] = useState(() => typeof navigator !== 'undefined' && !!navigator.mediaDevices?.getUserMedia)
   const standbyStopRef = useRef<(() => void) | null>(null)
@@ -167,7 +169,7 @@ export default function ChatPage() {
       voiceSafetyRef.current = null
       resumeAfterSpeak()
     }, Math.min(5000 + plain.length * 320, 90000))
-    void tts(plain)
+    void tts(plain, getPrefs().ttsVoice)
       .then((blob) => playBlob(blob).then(resumeAfterSpeak, resumeAfterSpeak))
       .catch(() => speakFallback(plain).then(resumeAfterSpeak, resumeAfterSpeak))
   }, [])
@@ -185,6 +187,7 @@ export default function ChatPage() {
     liveTextRef.current = ''
     hadErrorRef.current = false
     setLiveTool('')
+    setPendingConfirm(null)
     void streamChat(activeId, text, (piece) => {
       // 真流式打字机：delta 增量实时进右上角 JARVIS 回显
       if (hadErrorRef.current) return
@@ -210,10 +213,21 @@ export default function ChatPage() {
     }, (step: StreamStep) => {
       // 工具步骤实时上遥测：calling 显示工具名，done 回落思考态
       setLiveTool(step.status === 'calling' ? step.tool : '')
+    }, (pending) => {
+      // 高危操作待确认：弹确认条，点按钮或语音说“确认/取消”均可
+      setPendingConfirm(pending)
     }).finally(() => { setSending(false); sendingRef.current = false })
   }, [activeId, sending, clearToast, showToast, speakReply])
 
-  const handleWake = useCallback((command: string) => { setWakeStatus('已唤醒'); stopAudio(); stopSpeaking(); setSpeakGuard(false); playWakeTone(); const text = command.trim(); if (text) doSend(text); else setWakeStatus('已唤醒，请说指令') }, [doSend])
+  const handleWake = useCallback((command: string) => {
+    setWakeStatus('已唤醒'); stopAudio(); stopSpeaking(); setSpeakGuard(false); playWakeTone()
+    const text = command.trim()
+    if (text) { doSend(text); return }
+    // 唤醒未带指令：按时段问候，管家式仪式感
+    const hour = new Date().getHours()
+    const greet = hour < 5 ? '夜深了' : hour < 12 ? '早上好' : hour < 18 ? '下午好' : '晚上好'
+    setWakeStatus(`${greet}，先生。请说指令`)
+  }, [doSend])
   const handleWakeRef = useRef(handleWake); handleWakeRef.current = handleWake
   const stopStandbyLocal = useCallback(() => { standbyOnRef.current = false; if (standbyTimerRef.current) window.clearTimeout(standbyTimerRef.current); standbyStopRef.current?.(); standbyStopRef.current = null; resetWakeState(); setSpeakGuard(false); setStandbyOn(false); setStandbyLive(''); setWakeStatus('') }, [])
   // 致命识别错误：不再假装监听，停掉待命并明确提示；瞬态错误（no-speech/aborted 等）由重挂自愈
@@ -295,6 +309,19 @@ export default function ChatPage() {
       const list = await listNotifications()
       if (cancelled || list.length === 0) return
       const latest = list[0]
+      // 页面隐藏时升级成系统通知（需用户授权，拒绝则静默）
+      if (document.hidden && typeof Notification !== 'undefined') {
+        if (Notification.permission === 'default') {
+          Notification.requestPermission().catch(() => {})
+        }
+        if (Notification.permission === 'granted') {
+          try {
+            new Notification(latest.title, { body: toPlainText(latest.content).slice(0, 120), icon: '/icon.svg' })
+          } catch {
+            // 部分浏览器要求走 ServiceWorker 注册，失败则退回页内展示
+          }
+        }
+      }
       const display = list.length === 1
         ? `【${latest.title}】${toPlainText(latest.content)}`
         : `【${latest.title}】等 ${list.length} 条新通知`
@@ -484,6 +511,14 @@ export default function ChatPage() {
             </div>
           )}
         </main>
+
+        {pendingConfirm && !sending && (
+          <div className="confirm-bar" role="alertdialog" aria-label="高危操作确认">
+            <span className="confirm-bar__text">{pendingConfirm.summary}</span>
+            <button className="confirm-bar__btn confirm-bar__btn--ok" onClick={() => doSend('确认')}>确认执行</button>
+            <button className="confirm-bar__btn" onClick={() => doSend('取消')}>取消</button>
+          </div>
+        )}
 
         <CommandDock
           input={input}

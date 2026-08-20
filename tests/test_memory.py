@@ -1,10 +1,22 @@
 # OneFlow 长期记忆测试：remember 工具 / 引擎注入 / /api/memories 接口
 import asyncio
 
+import pytest
+
 from app.agent.engine import run_agent
 from app.agent.llm import LLMResult
 from app.models import Conversation, User, UserMemory
 from app.tools.registry import execute
+
+
+@pytest.fixture(autouse=True)
+def _no_cloud_embedding(monkeypatch):
+    """测试隔离：embedding 一律返回 None（走全量注入回退路径），不碰网络。"""
+
+    async def _none(text, cfg):
+        return None
+
+    monkeypatch.setattr("app.agent.embed.embed_text", _none)
 
 
 def _make_user(db, username="mem_user"):

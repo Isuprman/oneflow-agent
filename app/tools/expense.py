@@ -15,6 +15,7 @@ from .registry import tool
         },
         "required": ["amount"],
     },
+    requires_confirm=True,
 )
 def add_expense(args, user, db):
     amount = args.get("amount")

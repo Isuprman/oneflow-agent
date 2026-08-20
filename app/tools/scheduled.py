@@ -38,6 +38,7 @@ def _parse_once_datetime(date: str, hour: int, minute: int) -> datetime | None:
         },
         "required": ["title", "instruction", "kind", "hour"],
     },
+    requires_confirm=True,
 )
 def create_scheduled_task(args, user, db):
     from ..models import ScheduledTask
@@ -133,6 +134,7 @@ def list_scheduled_tasks(args, user, db):
         "properties": {"task_id": {"type": "integer", "description": "要取消的任务 id"}},
         "required": ["task_id"],
     },
+    requires_confirm=True,
 )
 def cancel_scheduled_task(args, user, db):
     from ..models import ScheduledTask

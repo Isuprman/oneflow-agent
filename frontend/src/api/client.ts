@@ -117,6 +117,12 @@ export interface StreamStep {
   result?: unknown
 }
 
+/** SSE confirm 事件：高危操作待用户确认。 */
+export interface StreamConfirm {
+  tool: string
+  summary: string
+}
+
 export async function streamChat(
   conversationId: number | null,
   message: string,
@@ -124,6 +130,7 @@ export async function streamChat(
   onDone: (resp: ChatResponse) => void,
   onError: (e: Error) => void,
   onStep?: (step: StreamStep) => void,
+  onConfirm?: (pending: StreamConfirm) => void,
 ): Promise<void> {
   try {
     const token = localStorage.getItem('oneflow_token')
@@ -168,6 +175,8 @@ export async function streamChat(
         if (parsed.text) onDelta(parsed.text)
       } else if (event === 'step') {
         onStep?.(JSON.parse(data) as StreamStep)
+      } else if (event === 'confirm') {
+        onConfirm?.(JSON.parse(data) as StreamConfirm)
       } else if (event === 'error') {
         const parsed = JSON.parse(data) as { message?: string }
         onError(new Error(parsed.message ?? '服务异常'))

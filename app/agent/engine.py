@@ -4,11 +4,25 @@ import json
 
 from ..config import settings
 from ..db import SessionLocal  # noqa: F401  保持与规范一致的依赖导入
-from ..models import Message, ToolCallLog, UserMemory
-from ..tools.registry import execute, schemas
+from ..models import Message, PendingAction, ToolCallLog, UserMemory
+from ..tools.registry import execute, needs_confirmation, schemas
 from . import llm as llm_mod
 from .context import trim_history
 from .prompts import SYSTEM_PROMPT
+
+# 确认/取消口令（语音场景下宽松匹配前缀）
+CONFIRM_PHRASES = ("确认", "是的", "好的", "对", "可以", "没问题", "执行", "嗯", "要")
+CANCEL_PHRASES = ("取消", "不要", "算了", "不用")
+
+
+def _is_confirm(text: str) -> bool:
+    t = text.strip()
+    return any(t == p or t.startswith(p) for p in CONFIRM_PHRASES)
+
+
+def _is_cancel(text: str) -> bool:
+    t = text.strip()
+    return any(t == p or t.startswith(p) for p in CANCEL_PHRASES)
 
 
 async def _emit(on_event, event: dict) -> None:
@@ -18,6 +32,69 @@ async def _emit(on_event, event: dict) -> None:
     result = on_event(event)
     if asyncio.iscoroutine(result):
         await result
+
+
+def _tool_schemas(db, user_id: int) -> list:
+    """工具 schema：delegate 的 agent_name 动态列出内置+用户自定义子智能体。"""
+    from ..tools.custom_agent import available_agent_names
+
+    result = schemas()
+    try:
+        names = available_agent_names(db, user_id)
+    except Exception:
+        names = None
+    if names:
+        for s in result:
+            fn = s.get("function", {})
+            if fn.get("name") == "delegate":
+                fn["parameters"]["properties"]["agent_name"]["description"] = (
+                    "可选：" + " | ".join(names)
+                )
+    return result
+
+
+async def _recall_memories(db, user, user_msg: str, cfg) -> list[str]:
+    """记忆召回：有向量且可嵌入时按相似度 top-5，否则回退最近 20 条。"""
+    from .embed import cosine, embed_text, json_to_embedding
+
+    rows = (
+        db.query(UserMemory)
+        .filter(UserMemory.user_id == user.id)
+        .order_by(UserMemory.updated_at.desc())
+        .limit(50)
+        .all()
+    )
+    if not rows:
+        return []
+    query_vec = await embed_text(user_msg, cfg)
+    if query_vec is not None:
+        scored = []
+        for m in rows:
+            vec = json_to_embedding(m.embedding)
+            if vec is not None:
+                scored.append((cosine(query_vec, vec), m.content))
+        if scored:
+            scored.sort(key=lambda x: x[0], reverse=True)
+            return [content for _score, content in scored[:5]]
+    return [m.content for m in rows[:20]]
+
+
+def _pending_summary(tool_name: str, args: dict) -> str:
+    """高危操作的确认描述（给用户看的人话）。"""
+    if tool_name == "add_expense":
+        category = args.get("category") or "未分类"
+        note = f"，备注：{args['note']}" if args.get("note") else ""
+        return f"我将为您记一笔支出：{args.get('amount')} 元（{category}）{note}"
+    if tool_name == "create_scheduled_task":
+        return (
+            f"我将创建定时任务「{args.get('title')}」"
+            f"（{args.get('kind')}，{int(args.get('hour', 0)):02d}:{int(args.get('minute') or 0):02d} 执行）"
+        )
+    if tool_name == "cancel_scheduled_task":
+        return f"我将取消定时任务（id={args.get('task_id')}）"
+    if tool_name == "delete_custom_agent":
+        return f"我将删除自定义子智能体「{args.get('name')}」"
+    return f"我将执行高危操作 {tool_name}({json.dumps(args, ensure_ascii=False)})"
 
 
 async def run_agent(
@@ -44,6 +121,30 @@ async def run_agent(
     from ..user_cfg import get_llm_cfg
 
     cfg = get_llm_cfg(db, user.id)
+
+    # 1.5 高危操作确认流程：上轮有 pending 时，本轮先处理确认/取消
+    pending = (
+        db.query(PendingAction)
+        .filter(PendingAction.user_id == user.id, PendingAction.conversation_id == conversation_id)
+        .first()
+    )
+    confirmed_action = None
+    if pending is not None:
+        if _is_confirm(user_msg):
+            confirmed_action = (pending.tool_name, json.loads(pending.arguments))
+            db.delete(pending)
+            db.commit()
+        elif _is_cancel(user_msg):
+            db.delete(pending)
+            db.commit()
+            reply = "好的，已取消。"
+            db.add(Message(conversation_id=conversation_id, role="assistant", content=reply))
+            db.commit()
+            return reply, 1, []
+        else:
+            # 既非确认也非取消：丢弃 pending，按新指令正常处理
+            db.delete(pending)
+            db.commit()
 
     # 2. 构造跨轮基线上下文：读取该会话已有的 user/assistant 文本消息（排除 tool）
     rows = (
@@ -74,25 +175,57 @@ async def run_agent(
         history.append({"role": "user", "content": user_msg})
 
     messages = history
-    tools = schemas()
+    tools = _tool_schemas(db, user.id)
 
-    # 3.5. 加载长期记忆（最近 20 条），注入 system 供 LLM 参考
-    mem_rows = (
-        db.query(UserMemory)
-        .filter(UserMemory.user_id == user.id)
-        .order_by(UserMemory.updated_at.desc())
-        .limit(20)
-        .all()
-    )
+    # 3.5 注入画像 + 语义召回的长期记忆（无向量时自动回退最近 20 条）
+    from ..tools.profile import load_profile
+
     system_text = SYSTEM_PROMPT
-    if mem_rows:
-        system_text += "\n\n【关于用户的长期记忆】\n" + "\n".join(
-            f"- {m.content}" for m in mem_rows
-        )
+    profile = load_profile(db, user.id)
+    if profile:
+        system_text += "\n\n【用户画像】\n" + "\n".join(f"- {k}: {v}" for k, v in profile.items())
+    mem_contents = await _recall_memories(db, user, user_msg, cfg)
+    if mem_contents:
+        system_text += "\n\n【关于用户的长期记忆】\n" + "\n".join(f"- {c}" for c in mem_contents)
 
     trace = []
     steps = 0
     call_id = 0
+
+    # 3.6 上轮确认过的 pending 操作：执行并以 tool_call+结果接入上下文，让 LLM 汇报
+    if confirmed_action is not None:
+        name, confirmed_args = confirmed_action
+        await _emit(on_event, {"type": "tool_call", "tool": name, "arguments": confirmed_args})
+        result = execute(name, confirmed_args, user, db, cfg=cfg)
+        success = result.get("success", False)
+        trace.append({"tool": name, "arguments": confirmed_args, "result": result, "success": success})
+        await _emit(on_event, {"type": "tool_result", "tool": name, "success": success, "result": result})
+        tool_call_id = f"call_{call_id}"
+        call_id += 1
+        messages.append(
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": tool_call_id,
+                        "type": "function",
+                        "function": {"name": name, "arguments": json.dumps(confirmed_args, ensure_ascii=False)},
+                    }
+                ],
+            }
+        )
+        messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": json.dumps(result, ensure_ascii=False)})
+        db.add(
+            ToolCallLog(
+                conversation_id=conversation_id,
+                tool_name=name,
+                arguments=json.dumps(confirmed_args, ensure_ascii=False),
+                result=json.dumps(result, ensure_ascii=False),
+                success=1 if success else 0,
+            )
+        )
+        db.commit()
 
     while True:
         steps += 1
@@ -118,6 +251,27 @@ async def run_agent(
 
         if res.tool_call is not None:
             tc = res.tool_call
+            # 高危写操作：不直接执行，暂存 pending 并向用户要确认
+            if tc.name != "delegate" and needs_confirmation(tc.name):
+                summary = _pending_summary(tc.name, tc.arguments)
+                db.query(PendingAction).filter(
+                    PendingAction.user_id == user.id,
+                    PendingAction.conversation_id == conversation_id,
+                ).delete()
+                db.add(
+                    PendingAction(
+                        user_id=user.id,
+                        conversation_id=conversation_id,
+                        tool_name=tc.name,
+                        arguments=json.dumps(tc.arguments, ensure_ascii=False),
+                        summary=summary,
+                    )
+                )
+                reply = f"{summary}。请回复“确认”执行，或“取消”放弃。"
+                db.add(Message(conversation_id=conversation_id, role="assistant", content=reply))
+                db.commit()
+                await _emit(on_event, {"type": "confirm", "tool": tc.name, "summary": summary})
+                return reply, steps, trace
             await _emit(
                 on_event,
                 {"type": "tool_call", "tool": tc.name, "arguments": tc.arguments},
@@ -125,10 +279,10 @@ async def run_agent(
             if tc.name == "delegate":
                 agent_name = tc.arguments.get("agent_name")
                 instruction = tc.arguments.get("instruction")
-                from .subagent import run_subagent, SUB_AGENTS
+                from .subagent import resolve_agent, run_subagent
 
-                if agent_name not in SUB_AGENTS:
-                    result = {"success": False, "error": f"未知子智能体: {agent_name}，可选 life/finance/travel"}
+                if resolve_agent(db, user.id, agent_name) is None:
+                    result = {"success": False, "error": f"未知子智能体: {agent_name}，可先用 list_custom_agents 查看"}
                 else:
                     try:
                         sub_text, sub_steps = await run_subagent(
@@ -143,7 +297,7 @@ async def run_agent(
                     except Exception as e:
                         result = {"success": False, "error": f"子智能体执行失败: {e}"}
             else:
-                result = execute(tc.name, tc.arguments, user, db)
+                result = execute(tc.name, tc.arguments, user, db, cfg=cfg)
             success = result.get("success", False)
             trace.append(
                 {

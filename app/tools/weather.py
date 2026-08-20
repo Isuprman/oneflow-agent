@@ -45,7 +45,11 @@ def get_weather(args, user, db):
     if not city:
         return {"success": False, "error": "缺少城市"}
     date = args.get("date") or datetime.now().strftime("%Y-%m-%d")
+    return query_weather(city, date)
 
+
+def query_weather(city: str, date: str) -> dict:
+    """查询指定城市/日期天气（工具与调度器关怀规则共用）。"""
     with httpx.Client(timeout=10) as client:
         # 1. 地理编码：城市名 -> 经纬度
         try:
