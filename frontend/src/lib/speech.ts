@@ -1,6 +1,7 @@
-// 浏览器语音能力封装（Web Speech API，免费无 Key）。
+// 浏览器语音能力封装（Web Speech API，免费无 Key）+ 桌面端本地识别桥。
 // SpeechRecognition / SpeechSynthesis 不在 lib.dom 的 TS 类型里，
 // 这里统一用 any 显式断言，避免 TS 报错。
+import { startLocalMic, stopLocalMic } from './localVoice'
 
 export function getRecognition(): any | null {
   const w = window as any
@@ -128,27 +129,13 @@ function findWakeWord(text: string): { start: number; end: number } | null {
   return null
 }
 
-// 唤醒后免唤醒词连说的窗口时长
-const WAKE_SLOT_MS = 25000
+// 唤醒后免唤醒词连说的窗口时长（短窗口，减少误派发）
+const WAKE_SLOT_MS = 8000
 // 滑动窗口上限：既覆盖唤醒词跨 final 被切断的情况，又避免旧文本重复命中
 const WAKE_BUFFER_MAX = 40
 // 模块级唤醒状态：跨识别实例保留（识别会话结束自动重挂后不丢）
 let wakeState = { woken: false, awaiting: false, wakeAt: 0 }
 let wakeBuffer = ''
-
-// ---- 播报回声过滤（barge-in 基础设施） ----
-// 播报期间保持监听：与播报内容一致的转写判为回声忽略；不一致则视为用户打断
-let speakGuard = { active: false, text: '' }
-
-/** 去除标点/空白，供回声包含判定用。 */
-function normalizeSpeech(t: string): string {
-  return t.replace(/[\s，。！？、,.!?;；:："'“”‘’（）()【】《》\[\]…—~·-]/g, '')
-}
-
-/** 开启/关闭播报回声过滤；spokenText 为正在播报的纯文本。 */
-export function setSpeakGuard(active: boolean, spokenText = ''): void {
-  speakGuard = { active, text: normalizeSpeech(spokenText) }
-}
 
 /** 免唤醒词跟随窗口：播报结束后调用，之后直接说话即当指令（复用 awaiting 机制）。 */
 export function enterFollowUpWindow(): void {
@@ -157,8 +144,23 @@ export function enterFollowUpWindow(): void {
   wakeState.wakeAt = Date.now()
 }
 
-// ---- 唤醒音效（WebAudio 合成，无需音频资源） ----
+// ---- 音频解锁（浏览器自动播放限制）----
 let _toneCtx: AudioContext | null = null
+
+/** 在用户手势（pointerdown/keydown）中调用：创建并 resume AudioContext，
+ *  否则无手势时浏览器会把上下文挂起，唤醒音效等 WebAudio 声音全部静音。 */
+export function unlockAudio(): void {
+  try {
+    const w = window as any
+    const Ctor = w.AudioContext ?? w.webkitAudioContext
+    if (!Ctor) return
+    const ctx: AudioContext = _toneCtx ?? new Ctor()
+    _toneCtx = ctx
+    if (ctx.state === 'suspended') void ctx.resume()
+  } catch {
+    // 解锁失败不影响主流程
+  }
+}
 
 /** 短促上行“叮”：唤醒成功的仪式感反馈。 */
 export function playWakeTone(): void {
@@ -185,6 +187,19 @@ export function playWakeTone(): void {
   } catch {
     // 音效失败不影响主流程
   }
+}
+
+// ---- 桌面端本地识别桥（Electron + sherpa-onnx）----
+// preload 注入 window.oneflowDesktop；浏览器环境为 undefined → 自动回退 Web Speech
+export interface DesktopBridge {
+  asrAvailable: () => boolean
+  startAsr: () => void
+  stopAsr: () => void
+  sendAudio: (samples: Int16Array) => void
+  onEvent: (callback: (event: { type: string; text?: string }) => void) => void
+}
+export function getDesktopBridge(): DesktopBridge | null {
+  return ((window as any).oneflowDesktop as DesktopBridge | undefined) ?? null
 }
 
 /** 归零唤醒状态（手动关闭待命时调用，之后需重新唤醒才能下指令）。 */
@@ -242,17 +257,6 @@ export function startStandby(
     onInterim(live)
 
     if (finalAlts.length === 0) return
-
-    // 打断检测（barge-in）：播报期间监听不断，非回声的转写 = 用户在说话，直接当指令派发
-    if (speakGuard.active) {
-      const norm = normalizeSpeech(finalBest)
-      // 空转写或与播报内容重合→回声，忽略
-      if (!norm || (speakGuard.text !== '' && speakGuard.text.includes(norm))) return
-      speakGuard.active = false
-      wakeBuffer = ''
-      onWake(finalBest.trim())
-      return
-    }
 
     const now = Date.now()
 
@@ -344,4 +348,95 @@ export function startStandby(
 
 export function stopStandby(stop: () => void): void {
   stop()
+}
+
+// ---- 桌面端本地识别待命（Electron + sherpa-onnx）----
+// 与 startStandby 同语义：onInterim 实时转写、onWake 命中唤醒/指令；
+// 唤醒判定复用模块内 wakeState/wakeBuffer/变体表，播报期间由调用方暂停避免回声。
+export function startLocalStandby(
+  onInterim: (t: string) => void,
+  onWake: (command: string) => void,
+  onEnd?: () => void,
+  onError?: (message: string) => void,
+): () => void {
+  const bridge = getDesktopBridge()
+  if (!bridge) {
+    onError?.('桌面语音桥不可用')
+    return () => {}
+  }
+  let stopped = false
+
+  bridge.onEvent((event) => {
+    if (stopped) return
+    if (event.type === 'partial') {
+      onInterim(event.text ?? '')
+      return
+    }
+    if (event.type === 'error') {
+      onError?.(event.text ?? '本地识别异常')
+      return
+    }
+    if (event.type !== 'final') return
+    const text = (event.text ?? '').trim()
+    onInterim('')
+    if (!text) return
+
+    const now = Date.now()
+
+    // 已唤醒且等指令：窗口内免唤醒词直接当指令；超时回落需重新唤醒
+    if (wakeState.woken && wakeState.awaiting) {
+      if (now - wakeState.wakeAt <= WAKE_SLOT_MS) {
+        const hit = findWakeWord(text)
+        if (hit) {
+          const rest = text.slice(hit.end).trim()
+          if (rest) {
+            onWake(rest)
+            wakeState.woken = false
+            wakeState.awaiting = false
+          } else {
+            wakeState.wakeAt = now
+          }
+          return
+        }
+        onWake(text)
+        wakeState.woken = false
+        wakeState.awaiting = false
+        return
+      }
+      wakeState.woken = false
+      wakeState.awaiting = false
+      wakeBuffer = ''
+    }
+
+    // 未唤醒：滑动窗口 + 同音字变体扫描
+    wakeBuffer = (wakeBuffer + text).slice(-WAKE_BUFFER_MAX)
+    const hit = findWakeWord(wakeBuffer)
+    if (!hit) return
+    wakeBuffer = ''
+    wakeState.woken = true
+    wakeState.wakeAt = now
+    const inlineHit = findWakeWord(text)
+    const rest = inlineHit ? text.slice(inlineHit.end).trim() : ''
+    if (rest) {
+      onWake(rest)
+      wakeState.woken = false
+      wakeState.awaiting = false
+    } else {
+      wakeState.awaiting = true
+      onWake('')
+    }
+  })
+
+  bridge.startAsr() // 启动失败会通过 error 事件上抛
+  const micOk = startLocalMic((samples) => {
+    if (!stopped) bridge.sendAudio(samples)
+  })
+  if (!micOk) onError?.('麦克风不可用')
+
+  return () => {
+    stopped = true
+    stopLocalMic()
+    bridge.stopAsr()
+    onEnd?.()
+  }
 }

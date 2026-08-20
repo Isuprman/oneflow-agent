@@ -1,0 +1,16 @@
+{
+  "name": "oneflow-desktop",
+  "version": "1.0.0",
+  "description": "OneFlow 贾维斯桌面端（Electron 壳 + sherpa-onnx 本地语音）",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "models": "node scripts/download-models.js"
+  },
+  "dependencies": {
+    "sherpa-onnx-node": "^1.10.0"
+  },
+  "devDependencies": {
+    "electron": "^31.0.0"
+  }
+}
