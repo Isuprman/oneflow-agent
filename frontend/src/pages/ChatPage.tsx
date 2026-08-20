@@ -12,7 +12,7 @@ import HudCorners from '../components/HudCorners'
 import TelemetryStrip from '../components/TelemetryStrip'
 import { getPrefs, savePrefs } from '../prefs'
 import { useAuthStore } from '../store/auth'
-import { enterFollowUpWindow, playBlob, playWakeTone, resetWakeState, setSpeakGuard, speak as speakFallback, startStandby, stopAudio, stopSpeaking } from '../lib/speech'
+import { enterFollowUpWindow, getDesktopBridge, playBlob, playWakeTone, resetWakeState, speak as speakFallback, startLocalStandby, startStandby, stopAudio, stopSpeaking, unlockAudio } from '../lib/speech'
 import { getLevel, startMicAnalyser } from '../lib/audioReactive'
 import { toPlainText } from '../lib/plain'
 
@@ -132,13 +132,16 @@ export default function ChatPage() {
     }, 2500)
   }, [])
 
-  /** 语音播报一段纯文本：播报中保持待命监听（回声过滤防自听）+ barge-in，
-   *  播完进免唤醒跟随窗口；供对话回复与主动通知复用。 */
-  const speakReply = useCallback((plain: string) => {
+  /** 语音播报一段纯文本：暂停待命防回声 → edge-tts 播放 → 真实播完恢复待命。
+   *  followUp=true 时（仅对话回复）播完进免唤醒跟随窗口；通知/搭话播报不开。 */
+  const speakReply = useCallback((plain: string, followUp = false) => {
     if (!voiceOnRef.current || !plain) return
     setVoiceLive(true); voiceLiveRef.current = true
-    // 播报期间监听不断：开回声过滤，与播报内容重合的转写忽略，其余视为用户打断
-    if (standbyOnRef.current) setSpeakGuard(true, plain)
+    // 播报开始前暂停待命监听，避免扬声器声音被识别成指令（回声/循环）
+    if (standbyOnRef.current && !resumeStandbyRef.current) {
+      resumeStandbyRef.current = true
+      standbyActionsRef.current.pause()
+    }
     // 全息核心随播报律动（音频驱动开启时不覆盖真实麦克风数据）
     if (!voiceReactiveOnRef.current && speakAnimRef.current === null) {
       const startedAt = performance.now()
@@ -160,10 +163,13 @@ export default function ChatPage() {
       if (voiceTimerRef.current) window.clearTimeout(voiceTimerRef.current)
       voiceTimerRef.current = window.setTimeout(() => {
         setVoiceLive(false); voiceLiveRef.current = false
-        setSpeakGuard(false)
         stopSpeakAnim()
-        // 免唤醒跟随窗口：播完后直接说话即当指令，无需再说唤醒词
-        if (standbyOnRef.current) enterFollowUpWindow()
+        if (resumeStandbyRef.current) {
+          resumeStandbyRef.current = false
+          if (!standbyOnRef.current) standbyActionsRef.current.resume()
+          // 免唤醒跟随窗口：仅对话回复后开启，直接说话即当指令
+          if (followUp && standbyOnRef.current) enterFollowUpWindow()
+        }
       }, 400)
     }
     // 安全网：ended 事件异常不触发时兜底（按纯文本字数放宽估算 + 富余量）
@@ -179,7 +185,9 @@ export default function ChatPage() {
 
   const doSend = useCallback((rawText: string) => {
     const text = rawText.trim()
-    if (!text || sending) return
+    if (!text) return
+    // 忙时不再静默丢弃：明确告知用户上一件事还在处理
+    if (sending) { showToast('正在处理上一件事，请稍候'); return }
     clearToast()
     lastInteractionRef.current = Date.now()
     setInput(''); setSending(true); sendingRef.current = true; setError('')
@@ -207,7 +215,7 @@ export default function ChatPage() {
       setJarvisEcho(toPlainText(response.reply))
       if (jarvisEchoTimerRef.current) window.clearTimeout(jarvisEchoTimerRef.current)
       jarvisEchoTimerRef.current = window.setTimeout(() => setJarvisEcho(null), 3000)
-      speakReply(toPlainText(response.reply))
+      speakReply(toPlainText(response.reply), true)
     }, (reason) => {
       // 发送失败/服务端 error 事件：顶部 Toast；标记出错防播报错误文本
       hadErrorRef.current = true
@@ -225,7 +233,7 @@ export default function ChatPage() {
 
   const handleWake = useCallback((command: string) => {
     lastInteractionRef.current = Date.now()
-    setWakeStatus('已唤醒'); stopAudio(); stopSpeaking(); setSpeakGuard(false); playWakeTone()
+    setWakeStatus('已唤醒'); stopAudio(); stopSpeaking(); playWakeTone()
     const text = command.trim()
     if (text) { doSend(text); return }
     // 唤醒未带指令：按时段问候，管家式仪式感
@@ -234,7 +242,7 @@ export default function ChatPage() {
     setWakeStatus(`${greet}，先生。请说指令`)
   }, [doSend])
   const handleWakeRef = useRef(handleWake); handleWakeRef.current = handleWake
-  const stopStandbyLocal = useCallback(() => { standbyOnRef.current = false; if (standbyTimerRef.current) window.clearTimeout(standbyTimerRef.current); standbyStopRef.current?.(); standbyStopRef.current = null; resetWakeState(); setSpeakGuard(false); setStandbyOn(false); setStandbyLive(''); setWakeStatus('') }, [])
+  const stopStandbyLocal = useCallback(() => { standbyOnRef.current = false; if (standbyTimerRef.current) window.clearTimeout(standbyTimerRef.current); standbyStopRef.current?.(); standbyStopRef.current = null; resetWakeState(); setStandbyOn(false); setStandbyLive(''); setWakeStatus('') }, [])
   // 致命识别错误：不再假装监听，停掉待命并明确提示；瞬态错误（no-speech/aborted 等）由重挂自愈
   const handleStandbyError = useCallback((code: string) => {
     standbyErrorRef.current = code
@@ -250,13 +258,26 @@ export default function ChatPage() {
   const armStandby = useCallback(() => {
     standbyStopRef.current?.()
     standbyErrorRef.current = ''
-    standbyStopRef.current = startStandby(
-      (live) => { if (standbyOnRef.current) setStandbyLive(live) },
-      (command) => handleWakeRef.current(command),
-      () => { if (standbyOnRef.current) standbyTimerRef.current = window.setTimeout(() => { if (standbyOnRef.current) armStandbyRef.current() }, 800) },
-      (code) => handleStandbyErrorRef.current(code),
-    )
-    standbyOnRef.current = true; setStandbyOn(true); setStandbyLive(''); setWakeStatus('正在监听…')
+    // 传输层自动选择：桌面端且本地模型就绪 → sherpa-onnx 离线识别；否则回退浏览器 Web Speech
+    const bridge = getDesktopBridge()
+    const useLocal = !!bridge && bridge.asrAvailable()
+    const rearm = () => { if (standbyOnRef.current) standbyTimerRef.current = window.setTimeout(() => { if (standbyOnRef.current) armStandbyRef.current() }, 800) }
+    if (useLocal) {
+      standbyStopRef.current = startLocalStandby(
+        (live) => { if (standbyOnRef.current) setStandbyLive(live) },
+        (command) => handleWakeRef.current(command),
+        rearm,
+        (message) => setError(message),
+      )
+    } else {
+      standbyStopRef.current = startStandby(
+        (live) => { if (standbyOnRef.current) setStandbyLive(live) },
+        (command) => handleWakeRef.current(command),
+        rearm,
+        (code) => handleStandbyErrorRef.current(code),
+      )
+    }
+    standbyOnRef.current = true; setStandbyOn(true); setStandbyLive(''); setWakeStatus(useLocal ? '正在监听…（本地识别）' : '正在监听…')
   }, [])
   armStandbyRef.current = armStandby
   standbyActionsRef.current = { pause: stopStandbyLocal, resume: armStandby }
@@ -298,8 +319,11 @@ export default function ChatPage() {
 
   useEffect(() => {
     const prefs = getPrefs(); voiceOnRef.current = prefs.voice
-    const unlock = () => { const audio = new Audio(); audio.src = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA='; audio.volume = 0; audio.play().catch(() => {}); window.removeEventListener('pointerdown', unlock); window.removeEventListener('keydown', unlock) }
+    const unlock = () => { unlockAudio(); const audio = new Audio(); audio.src = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA='; audio.volume = 0; audio.play().catch(() => {}); window.removeEventListener('pointerdown', unlock); window.removeEventListener('keydown', unlock) }
     window.addEventListener('pointerdown', unlock); window.addEventListener('keydown', unlock)
+    // 桌面端但本地语音模型未下载：提示下载方式，自动回退浏览器识别
+    const bridge = getDesktopBridge()
+    if (bridge && !bridge.asrAvailable()) setError('本地语音模型未下载：在 desktop 目录执行 npm run models（当前已回退浏览器识别）')
     if (prefs.standby) standbyTimerRef.current = window.setTimeout(armStandby, 400)
     if (prefs.audioDrive) startVoiceReactiveRef.current()
     return () => { resumeStandbyRef.current = false; stopStandbyLocal(); stopVoiceReactive(); if (speakAnimRef.current !== null) window.cancelAnimationFrame(speakAnimRef.current); if (voiceTimerRef.current) window.clearTimeout(voiceTimerRef.current); if (voiceSafetyRef.current) window.clearTimeout(voiceSafetyRef.current); if (transcriptTimerRef.current !== null) window.clearTimeout(transcriptTimerRef.current); if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current); if (echoTimerRef.current !== null) window.clearTimeout(echoTimerRef.current); if (jarvisEchoTimerRef.current !== null) window.clearTimeout(jarvisEchoTimerRef.current); window.removeEventListener('pointerdown', unlock); window.removeEventListener('keydown', unlock) }

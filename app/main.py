@@ -1,12 +1,18 @@
 # OneFlow FastAPI 入口
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import inspect, text
 
 from .config import settings
 from .db import Base, engine, SessionLocal
 from . import models  # noqa: F401  确保建表前模型已注册
+
+# 前端构建产物（npm run build）；存在时由 FastAPI 托管，Electron 壳直接加载 :8020
+_FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 
 
 def _migrate_messages_reasoning() -> None:
@@ -90,3 +96,29 @@ app.include_router(notifications.router)
 app.include_router(briefing.router)
 app.include_router(tasks.router)
 app.include_router(idle_hint.router)
+
+# ---- 前端静态托管（仅在存在构建产物时启用，不影响纯 API 开发模式）----
+if (_FRONTEND_DIST / "assets").is_dir():
+    app.mount("/assets", StaticFiles(directory=_FRONTEND_DIST / "assets"), name="static-assets")
+
+
+@app.middleware("http")
+async def spa_fallback(request, call_next):
+    """SPA 回退：非 API 路径的 404 优先返回同名静态文件，其次返回 index.html。
+
+    用中间件而非 catch-all 路由：后者会吞掉 Starlette 对 /api/xxx/ 尾斜杠的
+    307 重定向，导致 POST 带斜杠路径变 405。
+    """
+    response = await call_next(request)
+    if response.status_code != 404 or request.url.path.startswith("/api"):
+        return response
+    if _FRONTEND_DIST.is_dir():
+        rel = request.url.path.lstrip("/")
+        if rel:
+            candidate = (_FRONTEND_DIST / rel).resolve()
+            if _FRONTEND_DIST in candidate.parents and candidate.is_file():
+                return FileResponse(candidate)
+        index = _FRONTEND_DIST / "index.html"
+        if index.is_file():
+            return FileResponse(index)
+    return response

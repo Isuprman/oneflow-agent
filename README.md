@@ -10,7 +10,8 @@
 ## 技术栈
 Python 3.12 · FastAPI · SQLite + SQLAlchemy · LiteLLM（多厂商 LLM）· APScheduler（后台调度）·
 ddgs + BeautifulSoup（联网）· 云端 Embedding（语义记忆，零本地负担）·
-React 18 + TypeScript + Vite · react-three-fiber（3D 全息核心）· PWA · pytest
+React 18 + TypeScript + Vite · react-three-fiber（3D 全息核心）· PWA ·
+**Electron（桌面壳）· sherpa-onnx（本地流式语音识别，离线）** · pytest
 
 ## 快速开始
 
@@ -29,13 +30,33 @@ curl http://127.0.0.1:8020/api/health
 
 打开 http://localhost:5178 注册登录，进「设置」填 LLM 密钥即可对话。页面可**安装为 PWA**（Dock 常驻）。
 
+## 桌面端（推荐，语音体验完全体）
+
+浏览器版语音识别依赖 Chrome→Google 服务（国内不稳定）；桌面端用 **sherpa-onnx 本地流式识别**，
+唤醒/识别全程离线、毫秒级响应，且音频播放无浏览器自动播放限制。
+
+```bash
+# 1. 构建前端（FastAPI 会托管 dist，Electron 直接加载 :8020）
+cd frontend && npm run build
+
+# 2. 安装桌面端依赖 + 下载本地语音模型（约 100MB，仅首次）
+cd ../desktop && npm install && npm run models
+
+# 3. 启动（自动拉起后端、托盘常驻、关闭窗口即隐身到托盘）
+npm start
+```
+
+> 未下载模型时桌面端自动回退浏览器 Web Speech，页面会提示下载命令。
+> 本地识别用流式 zipformer 中英双语模型（内存占用约 100~200MB，M1 无压力），断句由引擎内置端点检测完成。
+
 ## 贾维斯体验
 
 | 能力 | 说明 |
 |---|---|
-| 语音唤醒 | 常驻待命，唤醒词「贾维斯 / 小翼 / 你好小助手」，**同音字容错**，唤醒成功有上行音效 + **按时段问候**（早上好/晚上好，先生） |
-| 免唤醒连续对话 | 一次应答/播报结束后进入跟随窗口，直接说下一句即当指令，无需再喊唤醒词 |
-| 可打断（barge-in） | 播报期间监听不断：听到**非播报内容**的人声立即掐掉播报、执行你的新指令（回声自动过滤） |
+| 语音唤醒 | 常驻待命，唤醒词「贾维斯 / 小翼 / 你好小助手」，**同音字也能唤醒**；桌面端本地识别离线可用，浏览器端走 Web Speech。唤醒成功有上行音效 + **按时段问候**（早上好/晚上好，先生） |
+| 免唤醒连续对话 | 对话回复播报结束后进入 8 秒跟随窗口，直接说下一句即当指令，无需再喊唤醒词 |
+| 播报防回声 | 播报期间自动暂停监听、真实播完才恢复，彻底避免把 AI 自己的声音识别成指令 |
+| 忙时反馈 | 上一件事还在处理时再说指令，会明确提示“正在处理上一件事”，不再静默丢弃 |
 | 贾维斯人格 | 英式管家口吻：称呼"先生"，"遵命/已为您办妥"，先结论后细节 |
 | 高危操作确认 | 记账/建定时任务等写操作**先问再执行**，语音说"确认"或点确认条均可 |
 | 真流式 | SSE 实时推送：工具调用进度（`CALL xxx 调用中…`）+ 最终回复逐 token 打字机 |
@@ -131,5 +152,6 @@ curl http://127.0.0.1:8020/api/health
 - ✅ 联网能力：web_search + read_webpage，子 Agent 均可用
 - ✅ DeepSeek 思考模型兼容（reasoning_content 多轮回传 + 落库）
 - ✅ PWA：manifest + Service Worker，可安装到 Dock；页面隐藏时系统通知
+- ✅ 桌面端：Electron 壳（自动拉起后端/托盘常驻/音频策略解锁）+ sherpa-onnx 本地流式识别（离线唤醒与转写，自动回退 Web Speech）
 - ✅ 3D 全息前端：全息核心随播报律动 · 深空 HUD · 打字机/动效 · 功能全保留
-- ⏭ 下一步可选：拍照/截图记账（多模态，需视觉模型）· 本地 ASR（faster-whisper，吃内存暂缓）· 真 Web Push · RAG · Telegram 入口 · Docker
+- ⏭ 下一步可选：拍照/截图记账（多模态，需视觉模型）· 本地唤醒词模型（keyword spotter）· 真 Web Push · RAG · Telegram 入口 · 打包 .app（electron-builder）
