@@ -197,6 +197,8 @@ export interface DesktopBridge {
   stopAsr: () => void
   sendAudio: (samples: Int16Array) => void
   onEvent: (callback: (event: { type: string; text?: string }) => void) => void
+  /** 语音链路决策日志（输出到 Electron 终端，排查用） */
+  log?: (message: string) => void
 }
 export function getDesktopBridge(): DesktopBridge | null {
   return ((window as any).oneflowDesktop as DesktopBridge | undefined) ?? null
@@ -353,6 +355,13 @@ export function stopStandby(stop: () => void): void {
 // ---- 桌面端本地识别待命（Electron + sherpa-onnx）----
 // 与 startStandby 同语义：onInterim 实时转写、onWake 命中唤醒/指令；
 // 唤醒判定复用模块内 wakeState/wakeBuffer/变体表，播报期间由调用方暂停避免回声。
+// 防假唤醒三件套：启动冷却期（丢 TTS 余音）+ 垃圾短文本过滤 + 决策日志。
+const LOCAL_COOLDOWN_MS = 1200
+
+function stripPunct(t: string): string {
+  return t.replace(/[\s，。！？、,.!?;；:："'“”‘’（）()【】《》…~·-]/g, '')
+}
+
 export function startLocalStandby(
   onInterim: (t: string) => void,
   onWake: (command: string) => void,
@@ -365,6 +374,10 @@ export function startLocalStandby(
     return () => {}
   }
   let stopped = false
+  const armedAt = Date.now()
+  const bridgeLog = (msg: string) => {
+    try { bridge.log?.(msg) } catch { /* 日志失败不影响主流程 */ }
+  }
 
   bridge.onEvent((event) => {
     if (stopped) return
@@ -378,26 +391,41 @@ export function startLocalStandby(
     }
     if (event.type !== 'final') return
     const text = (event.text ?? '').trim()
-    onInterim('')
+    // final 上屏：复用「转写」展示位（现有机制 2.2s 自动淡出），问题可观察
+    onInterim(text)
     if (!text) return
+
+    // 冷却期：监听（重）启动后短窗口内的结果丢弃——挡播报余音/设备噪声造成的假唤醒
+    if (Date.now() - armedAt < LOCAL_COOLDOWN_MS) {
+      bridgeLog(`丢弃(冷却期): ${text}`)
+      return
+    }
 
     const now = Date.now()
 
     // 已唤醒且等指令：窗口内免唤醒词直接当指令；超时回落需重新唤醒
     if (wakeState.woken && wakeState.awaiting) {
       if (now - wakeState.wakeAt <= WAKE_SLOT_MS) {
+        // 垃圾过滤：去掉标点后 ≤1 字的短文本不配当指令（防噪声抢占管道）
+        if (stripPunct(text).length <= 1) {
+          bridgeLog(`丢弃(垃圾短文本): ${text}`)
+          return
+        }
         const hit = findWakeWord(text)
         if (hit) {
           const rest = text.slice(hit.end).trim()
           if (rest) {
+            bridgeLog(`派发(窗口内含唤醒词): ${rest}`)
             onWake(rest)
             wakeState.woken = false
             wakeState.awaiting = false
           } else {
+            bridgeLog(`刷新窗口(仅唤醒词): ${text}`)
             wakeState.wakeAt = now
           }
           return
         }
+        bridgeLog(`派发(窗口内免唤醒): ${text}`)
         onWake(text)
         wakeState.woken = false
         wakeState.awaiting = false
@@ -411,17 +439,22 @@ export function startLocalStandby(
     // 未唤醒：滑动窗口 + 同音字变体扫描
     wakeBuffer = (wakeBuffer + text).slice(-WAKE_BUFFER_MAX)
     const hit = findWakeWord(wakeBuffer)
-    if (!hit) return
+    if (!hit) {
+      bridgeLog(`未命中唤醒词: ${text}`)
+      return
+    }
     wakeBuffer = ''
     wakeState.woken = true
     wakeState.wakeAt = now
     const inlineHit = findWakeWord(text)
     const rest = inlineHit ? text.slice(inlineHit.end).trim() : ''
     if (rest) {
+      bridgeLog(`唤醒+指令: ${rest}`)
       onWake(rest)
       wakeState.woken = false
       wakeState.awaiting = false
     } else {
+      bridgeLog('仅唤醒，等待指令')
       wakeState.awaiting = true
       onWake('')
     }

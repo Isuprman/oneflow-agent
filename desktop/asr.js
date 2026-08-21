@@ -80,16 +80,18 @@ function resetStream() {
   utteranceMs = 0
 }
 
-/** 启动识别管线；emitFn 接收 {type:'partial'|'final'|'error', text} 事件。 */
+/** 启动识别管线；emitFn 接收 {type:'partial'|'final'|'error', text} 事件。
+ *  返回 true=就绪；false=模型/引擎不可用（已通过 error 事件告知原因）。 */
 function start(emitFn) {
   emit = emitFn || (() => {})
   if (!initRecognizer()) {
     emit({ type: 'error', text: '本地语音模型未就绪，请先运行 npm run models 下载' })
-    return
+    return false
   }
   if (!stream) stream = recognizer.createStream()
   resetStream()
   running = true
+  return true
 }
 
 function stop() {
