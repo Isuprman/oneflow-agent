@@ -73,38 +73,78 @@ export function stopSpeaking(): void {
 export const speechSupported: boolean = getRecognition() != null
 
 let _audio: HTMLAudioElement | null = null
+let _audioReject: (() => void) | null = null
 
-// 返回 Promise，真实播放结束（ended）才 resolve；加载/播放失败 reject。
-// 调用方据此决定何时恢复待命监听，替代按字数估算时长。
+// 返回 Promise，真实播放结束（ended）才 resolve；加载/播放失败 reject；
+// 被 stopAudio() 打断时以 Error('interrupted') reject，供分句播报链中止。
 export function playBlob(blob: Blob): Promise<void> {
   stopAudio()
   return new Promise((resolve, reject) => {
     const url = URL.createObjectURL(blob)
     const audio = new Audio(url)
     _audio = audio
+    _audioReject = () => {
+      _audioReject = null
+      URL.revokeObjectURL(url)
+      reject(new Error('interrupted'))
+    }
     audio.onended = () => {
       URL.revokeObjectURL(url)
       if (_audio === audio) _audio = null
+      if (_audioReject) { _audioReject = null }
       resolve()
     }
     audio.onerror = () => {
       URL.revokeObjectURL(url)
       if (_audio === audio) _audio = null
+      if (_audioReject) { _audioReject = null }
       reject(new Error('audio-play-failed'))
     }
     audio.play().catch((reason) => {
       URL.revokeObjectURL(url)
       if (_audio === audio) _audio = null
+      if (_audioReject) { _audioReject = null }
       reject(reason instanceof Error ? reason : new Error('audio-play-failed'))
     })
   })
 }
 
 export function stopAudio(): void {
+  const rejector = _audioReject
+  _audioReject = null
   if (_audio) {
     _audio.pause()
     _audio = null
   }
+  if (rejector) rejector()
+}
+
+/** 分句：按句号/感叹号/问号切，短碎片并入相邻句，超长按逗号再切。
+ *  供分句流水线播报：首句合成完即开播，把出声延迟从“全文”降到“首句”。 */
+export function splitSentences(text: string): string[] {
+  const raw = text.match(/[^。！？!?；;\n]+[。！？!?；;]*\n?/g) ?? [text]
+  const merged: string[] = []
+  for (const part of raw) {
+    const piece = part.trim()
+    if (!piece) continue
+    const last = merged[merged.length - 1]
+    if (last !== undefined && last.length < 10 && !/[。！？!?；;]$/.test(last)) {
+      merged[merged.length - 1] = last + piece
+    } else {
+      merged.push(piece)
+    }
+  }
+  const out: string[] = []
+  for (const sentence of merged) {
+    if (sentence.length <= 60) { out.push(sentence); continue }
+    const clauses = sentence.match(/[^，、,：:]+[，、,：:]*/g) ?? [sentence]
+    let buf = ''
+    for (const clause of clauses) {
+      if (buf.length + clause.length > 60 && buf) { out.push(buf); buf = clause } else { buf += clause }
+    }
+    if (buf) out.push(buf)
+  }
+  return out.length > 0 ? out : [text]
 }
 
 // 常驻待命（语音唤醒）相关
@@ -136,6 +176,70 @@ const WAKE_BUFFER_MAX = 40
 // 模块级唤醒状态：跨识别实例保留（识别会话结束自动重挂后不丢）
 let wakeState = { woken: false, awaiting: false, wakeAt: 0 }
 let wakeBuffer = ''
+
+// ---- 会话模式（长对话）：唤醒即进入，免唤醒词直接对话，说“退下”或闲置超时才退出 ----
+export interface ConvoEvent { type: 'enter' | 'exit'; reason?: 'user' | 'timeout' }
+export type ConvoCallback = (event: ConvoEvent) => void
+
+// 退出通道永远比进入通道宽：包含即退，同音字/漏词都能退
+const EXIT_PATTERNS = ['退下', '没事了', '没事儿了', '你先休息', '先休息吧', '没你事了', '不用你了']
+// 闲置自动退下时长：会话中这么久没说话，贾维斯自己告退
+const CONVO_IDLE_MS = 90000
+
+let convoState = { active: false, timer: null as number | null }
+
+export function isConvoActive(): boolean {
+  return convoState.active
+}
+
+export function isExitPhrase(text: string): boolean {
+  return EXIT_PATTERNS.some((pattern) => text.includes(pattern))
+}
+
+function armConvoTimer(onConvo?: ConvoCallback): void {
+  if (convoState.timer !== null) window.clearTimeout(convoState.timer)
+  convoState.timer = window.setTimeout(() => {
+    convoState.timer = null
+    convoState.active = false
+    onConvo?.({ type: 'exit', reason: 'timeout' })
+  }, CONVO_IDLE_MS)
+}
+
+function enterConvo(onConvo?: ConvoCallback): void {
+  convoState.active = true
+  onConvo?.({ type: 'enter' })
+  armConvoTimer(onConvo)
+}
+
+function exitConvo(onConvo?: ConvoCallback, reason: 'user' | 'timeout' = 'user'): void {
+  if (convoState.timer !== null) {
+    window.clearTimeout(convoState.timer)
+    convoState.timer = null
+  }
+  convoState.active = false
+  onConvo?.({ type: 'exit', reason })
+}
+
+/** 会话模式下处理一条 final：退出词/垃圾过滤/免唤醒派发。未处于会话模式返回 false。 */
+function tryConvoRoute(text: string, onWake: (command: string) => void, onConvo?: ConvoCallback): boolean {
+  if (!convoState.active) return false
+  const clean = text.trim()
+  if (!clean) return true
+  if (isExitPhrase(clean)) {
+    exitConvo(onConvo, 'user')
+    return true
+  }
+  if (stripPunct(clean).length <= 1) return true
+  armConvoTimer(onConvo)
+  // 句首带唤醒词则去掉（唤醒后连说“贾维斯，xx”的场景），其余原样派发
+  const hit = findWakeWord(clean)
+  let cmd = clean
+  if (hit && clean.slice(0, hit.start).trim() === '') {
+    cmd = clean.slice(hit.end).trim()
+  }
+  if (cmd) onWake(cmd)
+  return true
+}
 
 /** 免唤醒词跟随窗口：播报结束后调用，之后直接说话即当指令（复用 awaiting 机制）。 */
 export function enterFollowUpWindow(): void {
@@ -210,6 +314,12 @@ export function resetWakeState(): void {
   wakeState.awaiting = false
   wakeState.wakeAt = 0
   wakeBuffer = ''
+  // 一并退出会话模式（静默，不触发告别播报）
+  if (convoState.timer !== null) {
+    window.clearTimeout(convoState.timer)
+    convoState.timer = null
+  }
+  convoState.active = false
 }
 
 // 启动待命监听：持续识别，命中唤醒词后把后续指令回传。
@@ -223,6 +333,7 @@ export function startStandby(
   onWake: (command: string) => void,
   onEnd?: () => void,
   onError?: (code: string) => void,
+  onConvo?: ConvoCallback,
 ): () => void {
   const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
   if (!SR) return () => {}
@@ -259,6 +370,9 @@ export function startStandby(
     onInterim(live)
 
     if (finalAlts.length === 0) return
+
+    // 会话模式：免唤醒直接派发/退下词检测（优先于跟随窗口与唤醒扫描）
+    if (tryConvoRoute(finalAlts[0], onWake, onConvo)) return
 
     const now = Date.now()
 
@@ -305,6 +419,7 @@ export function startStandby(
     wakeBuffer = ''
     wakeState.woken = true
     wakeState.wakeAt = now
+    enterConvo(onConvo)
     const rest = wakeStateAwaitingRest(finalAlts)
     if (rest) {
       onWake(rest)
@@ -367,6 +482,7 @@ export function startLocalStandby(
   onWake: (command: string) => void,
   onEnd?: () => void,
   onError?: (message: string) => void,
+  onConvo?: ConvoCallback,
 ): () => void {
   const bridge = getDesktopBridge()
   if (!bridge) {
@@ -398,6 +514,12 @@ export function startLocalStandby(
     // 冷却期：监听（重）启动后短窗口内的结果丢弃——挡播报余音/设备噪声造成的假唤醒
     if (Date.now() - armedAt < LOCAL_COOLDOWN_MS) {
       bridgeLog(`丢弃(冷却期): ${text}`)
+      return
+    }
+
+    // 会话模式：免唤醒直接派发/退下词检测（优先于跟随窗口与唤醒扫描）
+    if (tryConvoRoute(text, onWake, onConvo)) {
+      bridgeLog(`会话模式处理: ${text}`)
       return
     }
 
@@ -446,6 +568,7 @@ export function startLocalStandby(
     wakeBuffer = ''
     wakeState.woken = true
     wakeState.wakeAt = now
+    enterConvo(onConvo)
     const inlineHit = findWakeWord(text)
     const rest = inlineHit ? text.slice(inlineHit.end).trim() : ''
     if (rest) {
