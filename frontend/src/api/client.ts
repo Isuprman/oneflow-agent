@@ -345,7 +345,9 @@ export async function tts(text: string, voice?: string): Promise<Blob> {
     const resp = await http.post(
       '/tts',
       { text, voice: voice ?? 'zh-CN-XiaoxiaoNeural' },
-      { responseType: 'blob' },
+      // 8 秒超时：edge-tts 走微软服务器国内偶发慢请求，超时即回退浏览器语音，
+      // 绝不让播报链路挂住几十秒
+      { responseType: 'blob', timeout: 8000 },
     )
     return resp.data as Blob
   } catch {

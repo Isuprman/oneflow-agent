@@ -12,7 +12,8 @@ import HudCorners from '../components/HudCorners'
 import TelemetryStrip from '../components/TelemetryStrip'
 import { getPrefs, savePrefs } from '../prefs'
 import { useAuthStore } from '../store/auth'
-import { enterFollowUpWindow, getDesktopBridge, playBlob, playWakeTone, resetWakeState, speak as speakFallback, startLocalStandby, startStandby, stopAudio, stopSpeaking, unlockAudio } from '../lib/speech'
+import { enterFollowUpWindow, getDesktopBridge, isConvoActive, playBlob, playWakeTone, resetWakeState, speak as speakFallback, splitSentences, startLocalStandby, startStandby, stopAudio, stopSpeaking, unlockAudio, type ConvoEvent } from '../lib/speech'
+import { pickQuip, resetQuipProgress } from '../lib/quips'
 import { getLevel, startMicAnalyser } from '../lib/audioReactive'
 import { toPlainText } from '../lib/plain'
 
@@ -80,6 +81,14 @@ export default function ChatPage() {
   const [liveTool, setLiveTool] = useState('')
   // 高危操作待确认（engine 暂存，等用户确认/取消）
   const [pendingConfirm, setPendingConfirm] = useState<{ tool: string; summary: string } | null>(null)
+  // 会话模式（唤醒即进入，说“退下”或闲置超时退出）
+  const [convoOn, setConvoOn] = useState(false)
+  // 播报链 id：每次 speakReply 自增，被打断的旧链自动作废
+  const speakChainRef = useRef(0)
+  // 连续空唤醒计数 + 俏皮话定时器 + 上次播报结束时刻（俏皮话情境感知用）
+  const emptyWakeCountRef = useRef(0)
+  const quipTimerRef = useRef<number | null>(null)
+  const lastSpeakEndRef = useRef(0)
   const [showInput] = useState(() => getPrefs().showInput)
   const [micAvailable] = useState(() => typeof navigator !== 'undefined' && !!navigator.mediaDevices?.getUserMedia)
   const standbyStopRef = useRef<(() => void) | null>(null)
@@ -132,8 +141,8 @@ export default function ChatPage() {
     }, 2500)
   }, [])
 
-  /** 语音播报一段纯文本：暂停待命防回声 → edge-tts 播放 → 真实播完恢复待命。
-   *  followUp=true 时（仅对话回复）播完进免唤醒跟随窗口；通知/搭话播报不开。 */
+  /** 语音播报一段文本：分句流水线（首句合成完即开播，合成与播放交错）+ 暂停待命防回声。
+   *  followUp=true 时（仅对话回复）播完进免唤醒跟随窗口；显示与声音对齐：播报期间文字不淡出。 */
   const speakReply = useCallback((plain: string, followUp = false) => {
     if (!voiceOnRef.current || !plain) return
     setVoiceLive(true); voiceLiveRef.current = true
@@ -142,6 +151,8 @@ export default function ChatPage() {
       resumeStandbyRef.current = true
       standbyActionsRef.current.pause()
     }
+    // 播报期间回显文字保持展示，播完才淡出（消除“字先消失声音才来”的错位）
+    if (jarvisEchoTimerRef.current) { window.clearTimeout(jarvisEchoTimerRef.current); jarvisEchoTimerRef.current = null }
     // 全息核心随播报律动（音频驱动开启时不覆盖真实麦克风数据）
     if (!voiceReactiveOnRef.current && speakAnimRef.current === null) {
       const startedAt = performance.now()
@@ -158,29 +169,54 @@ export default function ChatPage() {
       speakAnimRef.current = null
       if (!voiceReactiveOnRef.current) reactiveLevelRef.current = { vol: 0, low: 0 }
     }
-    // 恢复待命：以真实播放结束为准 + 缓冲，不再按字数估算；播报中被打断也算结束
-    const resumeAfterSpeak = () => {
-      if (voiceTimerRef.current) window.clearTimeout(voiceTimerRef.current)
-      voiceTimerRef.current = window.setTimeout(() => {
-        setVoiceLive(false); voiceLiveRef.current = false
-        stopSpeakAnim()
-        if (resumeStandbyRef.current) {
-          resumeStandbyRef.current = false
-          if (!standbyOnRef.current) standbyActionsRef.current.resume()
-          // 免唤醒跟随窗口：仅对话回复后开启，直接说话即当指令
-          if (followUp && standbyOnRef.current) enterFollowUpWindow()
-        }
-      }, 400)
+    const chainId = ++speakChainRef.current
+    // 全部句子播完后收尾；被新链取代的旧链不做收尾（新链接管待命恢复）
+    const finish = () => {
+      if (speakChainRef.current !== chainId) return
+      speakChainRef.current = 0
+      setVoiceLive(false); voiceLiveRef.current = false
+      stopSpeakAnim()
+      lastSpeakEndRef.current = Date.now()
+      if (resumeStandbyRef.current) {
+        resumeStandbyRef.current = false
+        if (!standbyOnRef.current) standbyActionsRef.current.resume()
+        if (followUp && standbyOnRef.current) enterFollowUpWindow()
+      }
+      if (jarvisEchoTimerRef.current) window.clearTimeout(jarvisEchoTimerRef.current)
+      jarvisEchoTimerRef.current = window.setTimeout(() => setJarvisEcho(null), 3500)
     }
-    // 安全网：ended 事件异常不触发时兜底（按纯文本字数放宽估算 + 富余量）
+    // 分句流水线：首句合成完即开播；单句合成失败/超时回退浏览器语音读该句
+    const sentences = splitSentences(plain)
+    void (async () => {
+      for (const sentence of sentences) {
+        if (speakChainRef.current !== chainId) return
+        let played = false
+        try {
+          const blob = await tts(sentence, getPrefs().ttsVoice)
+          if (speakChainRef.current !== chainId) return
+          await playBlob(blob)
+          played = true
+        } catch (err) {
+          // 被打断（唤醒/新播报取代）：作废本链，待命恢复交给新链或 handleWake 的延迟兜底
+          if (err instanceof Error && err.message === 'interrupted') {
+            if (speakChainRef.current === chainId) speakChainRef.current = 0
+            return
+          }
+        }
+        if (speakChainRef.current !== chainId) return
+        if (!played) {
+          try { await speakFallback(sentence) } catch { /* 被打断 */ }
+          if (speakChainRef.current !== chainId) return
+        }
+      }
+      finish()
+    })()
+    // 安全网：链条异常卡死时按全文估算强制收尾
     if (voiceSafetyRef.current) window.clearTimeout(voiceSafetyRef.current)
     voiceSafetyRef.current = window.setTimeout(() => {
       voiceSafetyRef.current = null
-      resumeAfterSpeak()
-    }, Math.min(5000 + plain.length * 320, 90000))
-    void tts(plain, getPrefs().ttsVoice)
-      .then((blob) => playBlob(blob).then(resumeAfterSpeak, resumeAfterSpeak))
-      .catch(() => speakFallback(plain).then(resumeAfterSpeak, resumeAfterSpeak))
+      finish()
+    }, Math.min(8000 + plain.length * 320, 120000))
   }, [])
 
   const doSend = useCallback((rawText: string) => {
@@ -209,12 +245,18 @@ export default function ChatPage() {
     }, (response) => {
       setLiveTool('')
       if (activeId === null) { setActiveId(response.conversation_id); listConversations().then(setConversations).catch(() => {}) }
-      // 本轮出过错：不重复展示/播报错误文本（Toast 已提示）
-      if (hadErrorRef.current) return
-      // 右上角 JARVIS 回复回显：完成后 ~3s 自动消失；不再进左侧时间线（显示净化后的纯文本）
+      // 本轮出过错：不重复展示/播报错误文本（Toast 已提示）；若播报暂停过则恢复待命
+      if (hadErrorRef.current) {
+        if (resumeStandbyRef.current) {
+          resumeStandbyRef.current = false
+          if (!standbyOnRef.current) standbyActionsRef.current.resume()
+        }
+        return
+      }
+      // 右上角 JARVIS 回复回显：语音开启时文字保持到播完才淡出（显示与声音对齐）
       setJarvisEcho(toPlainText(response.reply))
       if (jarvisEchoTimerRef.current) window.clearTimeout(jarvisEchoTimerRef.current)
-      jarvisEchoTimerRef.current = window.setTimeout(() => setJarvisEcho(null), 3000)
+      if (!voiceOnRef.current) jarvisEchoTimerRef.current = window.setTimeout(() => setJarvisEcho(null), 3500)
       speakReply(toPlainText(response.reply), true)
     }, (reason) => {
       // 发送失败/服务端 error 事件：顶部 Toast；标记出错防播报错误文本
@@ -233,15 +275,53 @@ export default function ChatPage() {
 
   const handleWake = useCallback((command: string) => {
     lastInteractionRef.current = Date.now()
-    setWakeStatus('已唤醒'); stopAudio(); stopSpeaking(); playWakeTone()
+    setWakeStatus('已唤醒'); stopAudio(); stopSpeaking()
+    playWakeTone()
+    // 播报链被打断后，若 1.5s 内没有新播报接管，恢复待命（防卡在暂停态）
+    window.setTimeout(() => {
+      if (speakChainRef.current === 0 && resumeStandbyRef.current) {
+        resumeStandbyRef.current = false
+        if (!standbyOnRef.current) standbyActionsRef.current.resume()
+      }
+    }, 1500)
+    // 任何一句真话到达：取消待发的俏皮话
+    if (quipTimerRef.current) { window.clearTimeout(quipTimerRef.current); quipTimerRef.current = null }
     const text = command.trim()
-    if (text) { doSend(text); return }
-    // 唤醒未带指令：按时段问候，管家式仪式感
+    if (text) {
+      // 正常指令：重置空唤醒递进（他“原谅”你了）
+      emptyWakeCountRef.current = 0
+      resetQuipProgress()
+      doSend(text)
+      return
+    }
+    // 仅唤醒：时段问候 + 3.5s 内没指令则来一句俏皮话
     const hour = new Date().getHours()
     const greet = hour < 5 ? '夜深了' : hour < 12 ? '早上好' : hour < 18 ? '下午好' : '晚上好'
     setWakeStatus(`${greet}，先生。请说指令`)
-  }, [doSend])
+    emptyWakeCountRef.current += 1
+    const count = emptyWakeCountRef.current
+    quipTimerRef.current = window.setTimeout(() => {
+      quipTimerRef.current = null
+      if (sendingRef.current || voiceLiveRef.current || !isConvoActive()) return
+      const quip = pickQuip(count, {
+        night: hour >= 23 || hour < 5,
+        afterSpeak: Date.now() - lastSpeakEndRef.current < 60000,
+      })
+      setJarvisEcho(quip)
+      speakReply(quip)
+    }, 3500)
+  }, [doSend, speakReply])
   const handleWakeRef = useRef(handleWake); handleWakeRef.current = handleWake
+  // 会话模式事件：进入 → UI 状态；退出（用户说退下/闲置超时）→ 告别播报
+  const handleConvo = useCallback((event: ConvoEvent) => {
+    if (event.type === 'enter') { setConvoOn(true); return }
+    setConvoOn(false)
+    setWakeStatus('')
+    const line = event.reason === 'timeout' ? '那我先退下了，先生。' : '好的，先生，我先退下了。'
+    setJarvisEcho(line)
+    speakReply(line)
+  }, [speakReply])
+  const handleConvoRef = useRef(handleConvo); handleConvoRef.current = handleConvo
   const stopStandbyLocal = useCallback(() => { standbyOnRef.current = false; if (standbyTimerRef.current) window.clearTimeout(standbyTimerRef.current); standbyStopRef.current?.(); standbyStopRef.current = null; resetWakeState(); setStandbyOn(false); setStandbyLive(''); setWakeStatus('') }, [])
   // 致命识别错误：不再假装监听，停掉待命并明确提示；瞬态错误（no-speech/aborted 等）由重挂自愈
   const handleStandbyError = useCallback((code: string) => {
@@ -268,6 +348,7 @@ export default function ChatPage() {
         (command) => handleWakeRef.current(command),
         rearm,
         (message) => setError(message),
+        (event) => handleConvoRef.current(event),
       )
     } else {
       standbyStopRef.current = startStandby(
@@ -275,6 +356,7 @@ export default function ChatPage() {
         (command) => handleWakeRef.current(command),
         rearm,
         (code) => handleStandbyErrorRef.current(code),
+        (event) => handleConvoRef.current(event),
       )
     }
     standbyOnRef.current = true; setStandbyOn(true); setStandbyLive(''); setWakeStatus(useLocal ? '正在监听…（本地识别）' : '正在监听…')
@@ -326,7 +408,7 @@ export default function ChatPage() {
     if (bridge && !bridge.asrAvailable()) setError('本地语音模型未下载：在 desktop 目录执行 npm run models（当前已回退浏览器识别）')
     if (prefs.standby) standbyTimerRef.current = window.setTimeout(armStandby, 400)
     if (prefs.audioDrive) startVoiceReactiveRef.current()
-    return () => { resumeStandbyRef.current = false; stopStandbyLocal(); stopVoiceReactive(); if (speakAnimRef.current !== null) window.cancelAnimationFrame(speakAnimRef.current); if (voiceTimerRef.current) window.clearTimeout(voiceTimerRef.current); if (voiceSafetyRef.current) window.clearTimeout(voiceSafetyRef.current); if (transcriptTimerRef.current !== null) window.clearTimeout(transcriptTimerRef.current); if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current); if (echoTimerRef.current !== null) window.clearTimeout(echoTimerRef.current); if (jarvisEchoTimerRef.current !== null) window.clearTimeout(jarvisEchoTimerRef.current); window.removeEventListener('pointerdown', unlock); window.removeEventListener('keydown', unlock) }
+    return () => { resumeStandbyRef.current = false; stopStandbyLocal(); stopVoiceReactive(); if (speakAnimRef.current !== null) window.cancelAnimationFrame(speakAnimRef.current); if (quipTimerRef.current !== null) window.clearTimeout(quipTimerRef.current); if (voiceTimerRef.current) window.clearTimeout(voiceTimerRef.current); if (voiceSafetyRef.current) window.clearTimeout(voiceSafetyRef.current); if (transcriptTimerRef.current !== null) window.clearTimeout(transcriptTimerRef.current); if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current); if (echoTimerRef.current !== null) window.clearTimeout(echoTimerRef.current); if (jarvisEchoTimerRef.current !== null) window.clearTimeout(jarvisEchoTimerRef.current); window.removeEventListener('pointerdown', unlock); window.removeEventListener('keydown', unlock) }
   }, [armStandby, stopStandbyLocal, stopVoiceReactive])
 
   // 主动通知轮询：定时任务播报/日程提醒 → 右上角展示 + 语音播报 + 标记已读
@@ -352,21 +434,23 @@ export default function ChatPage() {
         }
       }
       lastInteractionRef.current = Date.now()
+      // 多条合并成一段播报；system_error 类只展示不播报（避免 TTS 读报错详情）
+      const speakable = list.filter((note) => note.kind !== 'system_error')
       const display = list.length === 1
         ? `【${latest.title}】${toPlainText(latest.content)}`
         : `【${latest.title}】等 ${list.length} 条新通知`
       setJarvisEcho(display)
       if (jarvisEchoTimerRef.current) window.clearTimeout(jarvisEchoTimerRef.current)
-      jarvisEchoTimerRef.current = window.setTimeout(() => setJarvisEcho(null), 6000)
-      // 多条合并成一段播报；system_error 类只展示不播报（避免 TTS 读报错详情）
-      const speakable = list.filter((note) => note.kind !== 'system_error')
       if (speakable.length > 0) {
         const speakText = speakable
           .map((note) => `${note.title}：${toPlainText(note.content)}`)
           .join('。')
           .slice(0, 500)
-        // followUp=true：播报期间麦克风本就暂停，播完后用户接话无回声风险，直接免唤醒派发
+        // followUp=true：播报期间麦克风本就暂停，播完后用户接话无回声风险，直接免唤醒派发；
+        // 文字由 speakReply 接管（播完才淡出）
         speakReply(speakText, true)
+      } else {
+        jarvisEchoTimerRef.current = window.setTimeout(() => setJarvisEcho(null), 6000)
       }
       for (const note of list) void markNotificationRead(note.id)
     }
@@ -389,7 +473,7 @@ export default function ChatPage() {
       lastInteractionRef.current = Date.now()
       setJarvisEcho(hint.text)
       if (jarvisEchoTimerRef.current) window.clearTimeout(jarvisEchoTimerRef.current)
-      jarvisEchoTimerRef.current = window.setTimeout(() => setJarvisEcho(null), 6000)
+      if (!voiceOnRef.current) jarvisEchoTimerRef.current = window.setTimeout(() => setJarvisEcho(null), 6000)
       speakReply(hint.text, true)
     }, 60000)
     return () => window.clearInterval(timer)
@@ -399,9 +483,9 @@ export default function ChatPage() {
 
   const hasConversation = messages.length > 0
   const coreState = sending ? 'thinking' : voiceLive ? 'speaking' : standbyOn ? 'standby' : undefined
-  const telemetry = sending ? (liveTool ? `CALL ${liveTool} 调用中…` : 'THINKING 思考中…') : voiceLive ? 'SPEAKING 播报中…' : standbyOn ? 'STANDBY 正在监听…' : 'SYSTEM READY 就绪'
+  const telemetry = sending ? (liveTool ? `CALL ${liveTool} 调用中…` : 'THINKING 思考中…') : voiceLive ? 'SPEAKING 播报中…' : convoOn ? '对话中 · 说「退下」结束' : standbyOn ? 'STANDBY 正在监听…' : 'SYSTEM READY 就绪'
   const standbyText = standbyOn ? (standbyLive ? `转写 ${standbyLive}` : wakeStatus) : ''
-  const sysStatus = sending ? (liveTool ? 'CALL' : 'THINK') : voiceLive ? 'SPEAK' : standbyOn ? 'STANDBY' : 'READY'
+  const sysStatus = sending ? (liveTool ? 'CALL' : 'THINK') : voiceLive ? 'SPEAK' : convoOn ? 'TALK' : standbyOn ? 'STANDBY' : 'READY'
 
   // 转写展示：说话时显示，静音 ~2.2s 后淡出消失（仅影响右上角展示态，不动识别主流程）
   useEffect(() => {
