@@ -135,6 +135,7 @@ ipcMain.on('asr:start', (event) => {
   const ok = asr.start((payload) => {
     if (!event.sender.isDestroyed()) event.sender.send('asr:event', payload)
   })
+  console.log(`[desktop] 本地语音引擎启动${ok ? '成功' : '失败'}`)
   if (!ok && !event.sender.isDestroyed()) {
     event.sender.send('asr:event', { type: 'error', text: '本地语音引擎启动失败' })
   }
@@ -151,6 +152,11 @@ ipcMain.on('asr:audio', (_event, samplesInt16) => {
   const float32 = new Float32Array(int16.length)
   for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768.0
   asr.feed(float32)
+})
+
+// 语音链路决策日志（唤醒命中/派发/丢弃），排查语音交互问题的第一手证据
+ipcMain.on('asr:log', (_event, message) => {
+  console.log(`[voice] ${message}`)
 })
 
 // ---------- 生命周期 ----------

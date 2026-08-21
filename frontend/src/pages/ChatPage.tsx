@@ -365,7 +365,8 @@ export default function ChatPage() {
           .map((note) => `${note.title}：${toPlainText(note.content)}`)
           .join('。')
           .slice(0, 500)
-        speakReply(speakText)
+        // followUp=true：播报期间麦克风本就暂停，播完后用户接话无回声风险，直接免唤醒派发
+        speakReply(speakText, true)
       }
       for (const note of list) void markNotificationRead(note.id)
     }
@@ -389,7 +390,7 @@ export default function ChatPage() {
       setJarvisEcho(hint.text)
       if (jarvisEchoTimerRef.current) window.clearTimeout(jarvisEchoTimerRef.current)
       jarvisEchoTimerRef.current = window.setTimeout(() => setJarvisEcho(null), 6000)
-      speakReply(hint.text)
+      speakReply(hint.text, true)
     }, 60000)
     return () => window.clearInterval(timer)
   }, [speakReply])

@@ -15,4 +15,6 @@ contextBridge.exposeInMainWorld('oneflowDesktop', {
     ipcRenderer.removeAllListeners('asr:event')
     ipcRenderer.on('asr:event', (_event, payload) => callback(payload))
   },
+  /** 语音链路决策日志 → Electron 终端（排查唤醒/派发问题用）。 */
+  log: (message) => ipcRenderer.send('asr:log', message),
 })
