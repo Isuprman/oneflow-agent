@@ -16,8 +16,8 @@ React 18 + TypeScript + Vite · react-three-fiber（3D 全息核心）· PWA ·
 ## 快速开始
 
 ```bash
-cd ~/work/oneflow-agent
-source .venv/bin/activate        # 虚拟环境已建好
+cd oneflow-agent
+source .venv/bin/activate        # 若未创建：python3 -m venv .venv
 # 1. 配置 .env（把你的 LLM 密钥填进去；也可在网页「设置」里每用户自填）
 #    LLM_PROVIDER / LLM_MODEL / LLM_API_KEY
 # 2. 启动后端（端口 8020，--reload 自动热更）
