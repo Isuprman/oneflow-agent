@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from ..agent.engine import run_agent
 from ..db import get_db
 from ..deps import get_current_user
+from ..learn.hook import is_learn_message, try_handle
 from ..models import Conversation, User
 from ..schemas import ChatRequest
 from ..user_cfg import llm_configured
@@ -54,6 +55,20 @@ async def chat_stream(
 
     async def event_gen():
         queue: asyncio.Queue = asyncio.Queue()
+
+        # ── 自学习钩子：学习请求 / 审批指令不走 agent ──
+        if is_learn_message(body.message):
+            yield _sse("step", {"tool": "self_learn", "status": "calling"})
+            learn_reply = await try_handle(db, user, conv_id, body.message)
+            if learn_reply is not None:
+                yield _sse("step", {"tool": "self_learn", "status": "done", "success": True})
+                yield _sse("done", {
+                    "conversation_id": conv_id,
+                    "reply": learn_reply,
+                    "steps": 0,
+                    "trace": [],
+                })
+                return
 
         async def on_event(event: dict) -> None:
             kind = event["type"]

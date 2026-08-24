@@ -1,0 +1,156 @@
+# 聊天钩子 — 让贾维斯在对话里直接完成「学习」闭环
+#
+# 支持的说法：
+#   学习请求：「你要是能查快递就好了」「教你会翻译古文」「给自己加个记账工具」
+#   审批指令：「批准 12」「拒绝 12」「key 12 DEMO_API_KEY=sk-xxx」
+#
+# 返回 None 表示与本流程无关，交给正常 agent 处理。
+import asyncio
+import json
+import re
+
+from ..models import Message, User
+from . import service
+
+# 触发词保守列表：宁可不触发也不误劫持正常聊天
+_ACQUIRE_RE = re.compile(r"你要是能|要是你能|教你会|给你学会|学会一[个项]|给自己加[个一]|装个新工具|加个新技能")
+
+_APPROVE_RE = re.compile(r"^批准\s*(\d+)\s*$")
+_REJECT_RE = re.compile(r"^拒绝\s*(\d+)\s*$")
+_KEY_RE = re.compile(r"^key\s+(\d+)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(\S+)\s*$", re.I)
+
+
+def _save_pair(db, conversation_id: int, user_msg: str, reply: str) -> None:
+    db.add(Message(conversation_id=conversation_id, role="user", content=user_msg))
+    db.add(Message(conversation_id=conversation_id, role="assistant", content=reply))
+    db.commit()
+
+
+def _proposal_reply(p) -> str:
+    lines = [f"我在学这个新能力，候选已经准备好了：{p.title or p.slug}"]
+    if p.status == "failed":
+        lines = ["这次没学会，构建失败了。日志如下：", (p.test_output or "")[-800:]]
+        return "\n".join(lines)
+    keys = json.loads(p.required_keys or "{}")
+    lines.append(f"测试已通过，提案编号 #{p.id}。")
+    if keys:
+        lines.append("它需要这些密钥才能上线：")
+        for name, desc in keys.items():
+            lines.append(f"  · {name}（{desc}）→ 发送「key {p.id} {name}=你的密钥」")
+        lines.append(f"填完后发送「批准 {p.id}」即可上线。不想学了就发「拒绝 {p.id}」。")
+    else:
+        lines.append(f"发送「批准 {p.id}」我就把它合并上线；不想学了就发「拒绝 {p.id}」。")
+    lines.append(f"[LEARN_PROPOSAL]{json.dumps({'id': p.id, 'slug': p.slug, 'title': p.title, 'required_keys': keys, 'status': p.status}, ensure_ascii=False)}[/LEARN_PROPOSAL]")
+    return "\n".join(lines)
+
+
+def is_learn_message(text: str) -> bool:
+    """廉价预判（纯正则），供流式路由决定是否展示「学习中」步骤。"""
+    t = text.strip()
+    return bool(_ACQUIRE_RE.search(t) or _APPROVE_RE.match(t) or _REJECT_RE.match(t) or _KEY_RE.match(t))
+
+
+async def try_handle(db, user: User, conversation_id: int, user_msg: str):
+    """返回 (reply_text|None)。None = 非本流程消息。"""
+    text = user_msg.strip()
+
+    # ── 审批类指令（优先于学习触发判断）──
+    m = _APPROVE_RE.match(text)
+    if m:
+        proposal_id = int(m.group(1))
+
+        def _do_approve():
+            return _approve_with_saved_keys(db, user, proposal_id)
+
+        reply = await asyncio.to_thread(_do_approve)
+        _save_pair(db, conversation_id, user_msg, reply)
+        return reply
+
+    m = _REJECT_RE.match(text)
+    if m:
+        proposal_id = int(m.group(1))
+
+        def _do_reject():
+            from ..models import SkillProposal
+
+            proposal = db.query(SkillProposal).filter_by(id=proposal_id, user_id=user.id).first()
+            if proposal is None:
+                return f"找不到提案 #{proposal_id}。"
+            service.reject_proposal(db, user, proposal)
+            return f"好的，已放弃「{proposal.slug or proposal.title}」，现场已清理。"
+
+        reply = await asyncio.to_thread(_do_reject)
+        _save_pair(db, conversation_id, user_msg, reply)
+        return reply
+
+    m = _KEY_RE.match(text)
+    if m:
+        proposal_id, key_name, key_value = int(m.group(1)), m.group(2), m.group(3)
+
+        def _do_key():
+            from ..models import LearnKey, SkillProposal
+
+            proposal = db.query(SkillProposal).filter_by(id=proposal_id, user_id=user.id).first()
+            if proposal is None:
+                return f"找不到提案 #{proposal_id}。"
+            required = json.loads(proposal.required_keys or "{}")
+            if key_name not in required:
+                return f"提案 #{proposal_id} 不需要 {key_name}，需要的是：{'、'.join(required) or '（无）'}"
+            service.os_setenv(key_name, key_value)
+            row = db.query(LearnKey).filter_by(user_id=user.id, key_name=key_name).first()
+            if row:
+                row.value = key_value
+            else:
+                db.add(LearnKey(user_id=user.id, key_name=key_name, value=key_value))
+            db.commit()
+            missing = [k for k in required if not service.os_env_has(k)]
+            if missing:
+                return f"{key_name} 已记录。还缺：{'、'.join(missing)}"
+            return f"{key_name} 已记录，密钥齐了。发送「批准 {proposal_id}」上线。"
+
+        reply = await asyncio.to_thread(_do_key)
+        _save_pair(db, conversation_id, user_msg, reply)
+        return reply
+
+    # ── 学习触发 ──
+    if not _ACQUIRE_RE.search(text):
+        return None
+
+    from ..user_cfg import get_llm_map
+
+    cfg_map = get_llm_map(db, user.id)
+    cfg = {
+        "provider": cfg_map.get("llm.provider"),
+        "model": cfg_map.get("llm.model"),
+        "api_key": cfg_map.get("llm.api_key"),
+        "base_url": cfg_map.get("llm.base_url"),
+    }
+
+    def _build():
+        return service.build_proposal(db, user, text, cfg)
+
+    proposal = await asyncio.to_thread(_build)
+    reply = _proposal_reply(proposal)
+    _save_pair(db, conversation_id, user_msg, reply)
+    return reply
+
+
+def _approve_with_saved_keys(db, user: User, proposal_id: int) -> str:
+    """批准时从 LearnKey/环境里收集该提案需要的 key。"""
+    import os
+
+    from ..models import LearnKey, SkillProposal
+
+    proposal = db.query(SkillProposal).filter_by(id=proposal_id, user_id=user.id).first()
+    if proposal is None:
+        return f"找不到提案 #{proposal_id}。"
+    required = json.loads(proposal.required_keys or "{}")
+    keys = {name: os.environ[name] for name in required if os.environ.get(name)}
+    result = service.approve_proposal(db, user, proposal, keys)
+    if not result.get("ok"):
+        missing = result.get("missing_keys", {})
+        lines = ["还差这些密钥才能上线："]
+        for name, desc in missing.items():
+            lines.append(f"  · {name}（{desc}）→ 发送「key {proposal_id} {name}=你的密钥」")
+        return "\n".join(lines)
+    return f"学会了！「{result.get('tool_name', proposal.slug)}」已合并上线，现在就能用。"

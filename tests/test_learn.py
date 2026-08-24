@@ -40,6 +40,12 @@ def test_echo_empty(candidate):
 '''
 
 
+@pytest.fixture(autouse=True)
+def _force_subprocess_sandbox(monkeypatch):
+    """测试不依赖 Docker 状态：统一走子进程沙箱。"""
+    monkeypatch.setenv("LEARN_SANDBOX", "subprocess")
+
+
 def _fake_builder(tool=GOOD_TOOL, tests=GOOD_TESTS):
     async def fake_build_tool(user_request, cfg, repair_feedback=None):
         return tool, tests
@@ -209,3 +215,63 @@ def test_missing_key_blocks_approval(client, db_session, git_repo, monkeypatch):
     from app.tools.registry import _REGISTRY
 
     _REGISTRY.pop("demo_echo", None)
+
+
+# ─── 聊天钩子（对话里完成学习闭环）─────────────────────────────────
+
+def _setup_llm_config(db_session, user_id: int) -> None:
+    from app.models import UserSetting
+
+    session = db_session()
+    try:
+        for key in ("llm.provider", "llm.model", "llm.api_key"):
+            session.add(UserSetting(user_id=user_id, key=key, value="test"))
+        session.commit()
+    finally:
+        session.close()
+
+
+def test_chat_learn_loop(client, db_session, git_repo, monkeypatch):
+    import re as _re
+
+    monkeypatch.setattr("app.learn.builder.build_tool", _fake_builder())
+    headers = _register_and_login(client)
+    uid_row = client.get("/api/auth/me", headers=headers).json()
+    _setup_llm_config(db_session, uid_row["id"])
+
+    # ① 对话触发学习
+    resp = client.post("/api/chat", json={"message": "你要是能有个回显工具就好了"}, headers=headers)
+    assert resp.status_code == 200, resp.text
+    reply = resp.json()["reply"]
+    assert "提案编号" in reply
+    match = _re.search(r"\[LEARN_PROPOSAL\](\{.*?\})\[\/LEARN_PROPOSAL\]", reply)
+    assert match, reply
+    proposal_id = json.loads(match.group(1))["id"]
+
+    # ② 对话批准 → 上线且可执行
+    resp = client.post("/api/chat", json={"message": f"批准 {proposal_id}"}, headers=headers)
+    assert "学会了" in resp.json()["reply"]
+    from app.tools.registry import _REGISTRY, execute
+
+    assert execute("demo_echo", {"text": "ok"}, None, None)["success"] is True
+    _REGISTRY.pop("demo_echo", None)
+
+
+def test_chat_learn_reject_loop(client, db_session, git_repo, monkeypatch):
+    import re as _re
+
+    monkeypatch.setattr("app.learn.builder.build_tool", _fake_builder())
+    headers = _register_and_login(client)
+    uid_row = client.get("/api/auth/me", headers=headers).json()
+    _setup_llm_config(db_session, uid_row["id"])
+
+    resp = client.post("/api/chat", json={"message": "教你会回显吧"}, headers=headers)
+    match = _re.search(r"\[LEARN_PROPOSAL\](\{.*?\})\[\/LEARN_PROPOSAL\]", resp.json()["reply"])
+    proposal_id = json.loads(match.group(1))["id"]
+
+    resp = client.post("/api/chat", json={"message": f"拒绝 {proposal_id}"}, headers=headers)
+    assert "放弃" in resp.json()["reply"]
+    branches = subprocess.run(
+        ["git", "branch", "--list", "skill/demo_echo"], cwd=git_repo, capture_output=True, text=True
+    ).stdout
+    assert "skill/demo_echo" not in branches

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { MotionConfig, AnimatePresence, motion, type Variants } from 'framer-motion'
 import { createConversation, getMessages, getIdleHint, listConversations, listNotifications, markNotificationRead, streamChat, tts, type StreamStep } from '../api/client'
+import LearnProposalCard from '../components/LearnProposalCard'
 import type { Conversation, Message, ToolStep } from '../api/types'
 import AiCore, { type ReactiveLevel } from '../components/AiCore'
 import ParticleField from '../components/ParticleField'
@@ -619,6 +620,7 @@ export default function ChatPage() {
                       {message.content}
                       {message.isStreaming && <span className="type-cursor">▍</span>}
                     </div>
+                    {message.role === 'assistant' && <LearnProposalCard content={message.content} />}
                     {message.trace && message.trace.length > 0 && (
                       <>
                         <button
