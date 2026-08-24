@@ -124,6 +124,21 @@ async def try_handle(db, user: User, conversation_id: int, user_msg: str, on_pro
             reply = "好的，已取消。"
             _save_pair(db, conversation_id, user_msg, reply)
             return reply
+        if entry.get("kind") == "offer_reuse":
+            m_up = re.match(r"^升级\s*(.*)$", text)
+            new_raw = m_up.group(1).strip() if m_up else ""
+            if _CONFIRM_RE.match(text) or (m_up and not new_raw):
+                # 已会的技能没有「确认构建」一说：引导走升级或取消
+                reply = "请回复「升级」+ 新的需求描述来升级它，或回复「取消」。"
+                _save_pair(db, conversation_id, user_msg, reply)
+                return reply
+            if new_raw:
+                # 剥离前缀，按新需求回到正常确认流（重新复述等确认）
+                pending_intents[user.id] = {"raw": new_raw, "ts": time.time(), "kind": "confirm"}
+                reply = _confirm_prompt(new_raw)
+                _save_pair(db, conversation_id, user_msg, reply)
+                return reply
+            # 其余消息落入下方既有纠正逻辑
         if not _CONFIRM_RE.match(text):
             # 视为纠正：更新需求原文，重新等待确认
             pending_intents[user.id] = {"raw": text, "ts": time.time()}
@@ -196,8 +211,22 @@ async def try_handle(db, user: User, conversation_id: int, user_msg: str, on_pro
     if not _ACQUIRE_RE.search(text):
         return None
 
-    corrected = await correct_asr_text(text, _llm_cfg(db, user))
-    pending_intents[user.id] = {"raw": corrected, "ts": time.time()}
+    cfg = _llm_cfg(db, user)
+    corrected = await correct_asr_text(text, cfg)
+
+    # 复用检查：技能库里已有高度相似的 → 不重建，直接告诉用户「这个我已经会了」
+    from . import retrieval
+
+    similar = await retrieval.search_similar(db, user.id, corrected, cfg, top_k=1)
+    if similar and similar[0]["score"] >= 0.86:
+        top = similar[0]
+        pending_intents[user.id] = {"raw": text.strip(), "ts": time.time(), "kind": "offer_reuse", "offer": top}
+        reply = (f"这个我已经会了：{top['description']}（相似度 {int(top['score']*100)}%）。\n"
+                 f"直接对我说需求就能用它；想升级它就回复「升级」+ 新的需求描述；说「取消」忽略。")
+        _save_pair(db, conversation_id, user_msg, reply)
+        return reply
+
+    pending_intents[user.id] = {"raw": corrected, "ts": time.time(), "kind": "confirm"}
     reply = _confirm_prompt(corrected)
     _save_pair(db, conversation_id, user_msg, reply)
     return reply
