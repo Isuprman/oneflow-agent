@@ -9,6 +9,7 @@ from ..db import get_db
 from ..deps import get_current_user
 from ..learn import service
 from ..models import SkillProposal, User
+from ..user_cfg import get_llm_map, llm_configured
 
 router = APIRouter(prefix="/api/learn", tags=["learn"])
 
@@ -44,9 +45,22 @@ def acquire(
     """对贾维斯说「你要是能X就好了」的落点：构建候选工具（生成→门禁→沙箱→分支）。"""
     if not body.request.strip():
         raise HTTPException(400, "需求描述不能为空")
-    cfg = None  # MVP：构建器用全局默认 LLM；后续可透传用户配置
-    proposal = service.build_proposal(db, current_user, body.request.strip(), cfg)
-    return _to_out(proposal)
+    # 费用门禁：构建必须用请求用户自己的 LLM 配置，绝不回落到全局默认 key
+    if not llm_configured(db, current_user.id):
+        raise HTTPException(400, "未配置 LLM：请先在「设置」页填写你的 LLM 密钥")
+    cfg_map = get_llm_map(db, current_user.id)
+    cfg = {
+        "provider": cfg_map.get("llm.provider"),
+        "model": cfg_map.get("llm.model"),
+        "api_key": cfg_map.get("llm.api_key"),
+        "base_url": cfg_map.get("llm.base_url"),
+    }
+    duplicate = service.find_duplicate(db, current_user.id, body.request) is not None
+    try:
+        proposal = service.build_proposal(db, current_user, body.request.strip(), cfg)
+    except service.LearnError as e:
+        raise HTTPException(429, str(e))
+    return {**_to_out(proposal), "duplicate": duplicate}
 
 
 @router.get("/proposals")
