@@ -207,3 +207,16 @@ class LearnKey(Base):
     created_at = Column(DateTime, default=now)
 
     __table_args__ = (UniqueConstraint("user_id", "key_name", name="uq_learnkey_user_name"),)
+
+
+class LearnSkillEmbedding(Base):
+    """已上线技能的语义索引（slug + 描述 + 向量），相似请求复用而非重建。"""
+    __tablename__ = "learn_skill_embeddings"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    slug = Column(String(64), nullable=False)
+    description = Column(Text, default="")
+    embedding = Column(Text)                     # JSON 向量
+    created_at = Column(DateTime, default=now)
+
+    __table_args__ = (UniqueConstraint("user_id", "slug", name="uq_learnembed_user_slug"),)

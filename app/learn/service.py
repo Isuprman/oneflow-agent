@@ -251,6 +251,19 @@ def approve_proposal(db: Session, user: User, proposal: SkillProposal, keys: dic
     info = merge_and_activate(proposal.slug, proposal.branch)
     proposal.status = "approved"
     db.commit()
+
+    # 上线即建语义索引（相似请求可复用；失败不阻断上线）
+    try:
+        import asyncio
+
+        from .retrieval import index_skill
+
+        asyncio.run(index_skill(
+            db, user.id, proposal.slug,
+            proposal.description or proposal.title, None,
+        ))
+    except Exception:
+        pass
     return {"ok": True, **info}
 
 
