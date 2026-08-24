@@ -8,6 +8,7 @@ import json
 import logging
 import shutil
 import subprocess
+import threading
 import uuid
 from pathlib import Path
 
@@ -19,6 +20,10 @@ from . import gate
 logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+# 同用户构建并发锁：一个用户同一时刻只允许一条构建在跑
+_BUILDING: set[int] = set()
+_BUILDING_LOCK = threading.Lock()
 
 
 class LearnError(Exception):
@@ -108,8 +113,43 @@ def merge_and_activate(slug: str, branch: str) -> dict:
     return {"tool_name": tool_name, "live": live}
 
 
+def find_duplicate(db: Session, user_id: int, request_text: str) -> SkillProposal | None:
+    """该用户最近的 pending/approved 提案里，描述与本次请求（去首尾空白）完全一致的旧提案。"""
+    text = request_text.strip()
+    if not text:
+        return None
+    rows = (
+        db.query(SkillProposal)
+        .filter(SkillProposal.user_id == user_id, SkillProposal.status.in_(["pending", "approved"]))
+        .order_by(SkillProposal.id.desc())
+        .all()
+    )
+    for p in rows:
+        if (p.description or "").strip() == text:
+            return p
+    return None
+
+
 def build_proposal(db: Session, user: User, request_text: str, cfg: dict | None) -> SkillProposal:
-    """完整构建流程：LLM 生成→门禁→沙箱→分支提交→pending 提案。"""
+    """完整构建流程：去重→并发锁→LLM 生成→门禁→沙箱→分支提交→pending 提案。"""
+    # 重复请求去重：同样的需求已有在途/已上线提案 → 直接复用，不重建、不建分支
+    existing = find_duplicate(db, user.id, request_text)
+    if existing is not None:
+        return existing
+
+    with _BUILDING_LOCK:
+        if user.id in _BUILDING:
+            raise LearnError("上一条技能还在学习中，请稍候")
+        _BUILDING.add(user.id)
+    try:
+        return _build_proposal_locked(db, user, request_text, cfg)
+    finally:
+        with _BUILDING_LOCK:
+            _BUILDING.discard(user.id)
+
+
+def _build_proposal_locked(db: Session, user: User, request_text: str, cfg: dict | None) -> SkillProposal:
+    """持锁后的实际构建流程（由 build_proposal 调用）。"""
     from .builder import build_with_repair
     from .sandbox import run_tests
 
@@ -170,12 +210,27 @@ def build_proposal(db: Session, user: User, request_text: str, cfg: dict | None)
     ))
 
 
+def _branch_exists(branch: str | None) -> bool:
+    """分支在主仓是否真实存在（rev-parse --quiet 失败即不存在）。_git 会抛错，这里单独兜住。"""
+    if not branch:
+        return False
+    try:
+        _git(["rev-parse", "--verify", "--quiet", branch])
+        return True
+    except LearnError:
+        return False
+
+
 def approve_proposal(db: Session, user: User, proposal: SkillProposal, keys: dict[str, str]) -> dict:
     """批准：校验 key → 合并 → 热激活 → 记录 key。"""
     if proposal.status != "pending":
         raise LearnError(f"提案状态为 {proposal.status}，只有 pending 可批准")
     if proposal.user_id != user.id:
         raise LearnError("只能操作自己的提案")
+    if not _branch_exists(proposal.branch):
+        proposal.status = "failed"
+        db.commit()
+        raise LearnError("候选分支已不存在，请重新发起学习")
 
     required = json.loads(proposal.required_keys or "{}")
     missing = [k for k in required if k not in keys and not os_env_has(k)]
