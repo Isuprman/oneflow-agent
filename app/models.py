@@ -175,3 +175,35 @@ class PendingAction(Base):
     arguments = Column(Text, nullable=False)     # JSON
     summary = Column(Text, nullable=False)       # 给用户看的确认描述
     created_at = Column(DateTime, default=now)
+
+
+# ─── 自学习（技能工厂）───────────────────────────────────────────────
+
+
+class SkillProposal(Base):
+    """一次「学会新能力」的提案：构建产物 + 门禁/沙箱日志 + 审批状态。"""
+    __tablename__ = "skill_proposals"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    slug = Column(String(64), default="", index=True)          # 技能模块名；failed 时为空
+    title = Column(String(255), default="")                    # 工具名或需求摘要
+    description = Column(Text, default="")                     # 用户原始需求
+    status = Column(String(16), default="pending", index=True) # pending/approved/rejected/failed
+    tool_code = Column(Text, default="")
+    test_code = Column(Text, default="")
+    test_output = Column(Text, default="")                     # 门禁/沙箱/构建日志
+    required_keys = Column(Text, default="{}")                 # JSON: {"ENV名": "说明"}
+    branch = Column(String(128), default="")                   # skill/<slug>
+    created_at = Column(DateTime, default=now)
+
+
+class LearnKey(Base):
+    """自学习工具的外部服务密钥：批准时填入，落库并在启动时回注进程环境。"""
+    __tablename__ = "learn_keys"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    key_name = Column(String(128), nullable=False)
+    value = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=now)
+
+    __table_args__ = (UniqueConstraint("user_id", "key_name", name="uq_learnkey_user_name"),)

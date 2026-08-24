@@ -138,10 +138,11 @@ async def chat(
     kwargs = {
         "model": build_model_id(cfg),
         "messages": messages,
-        "tools": tools,
-        "tool_choice": "auto",
         "api_key": effective_key,
     }
+    if tools:  # 空列表不传，避免部分 provider 拒绝空 tools 参数（自学习构建器等纯文本场景）
+        kwargs["tools"] = tools
+        kwargs["tool_choice"] = "auto"
     api_base = (cfg.get("base_url") if cfg else None) or settings.llm_base_url
     if api_base:
         kwargs["api_base"] = api_base
