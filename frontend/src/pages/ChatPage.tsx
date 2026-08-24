@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { MotionConfig, AnimatePresence, motion, type Variants } from 'framer-motion'
 import { createConversation, getMessages, getIdleHint, listConversations, listNotifications, markNotificationRead, streamChat, tts, type StreamStep } from '../api/client'
+import LearnProposalCard from '../components/LearnProposalCard'
 import type { Conversation, Message, ToolStep } from '../api/types'
 import AiCore, { type ReactiveLevel } from '../components/AiCore'
 import ParticleField from '../components/ParticleField'
@@ -12,7 +13,7 @@ import HudCorners from '../components/HudCorners'
 import TelemetryStrip from '../components/TelemetryStrip'
 import { getPrefs, savePrefs } from '../prefs'
 import { useAuthStore } from '../store/auth'
-import { enterFollowUpWindow, getDesktopBridge, isConvoActive, playBlob, playWakeTone, resetWakeState, speak as speakFallback, splitSentences, startLocalStandby, startStandby, stopAudio, stopSpeaking, unlockAudio, type ConvoEvent } from '../lib/speech'
+import { bumpConvoIdle, enterFollowUpWindow, getDesktopBridge, isConvoActive, playBlob, playWakeTone, resetWakeState, speak as speakFallback, splitSentences, startLocalStandby, startStandby, stopAudio, stopSpeaking, unlockAudio, type ConvoEvent } from '../lib/speech'
 import { pickQuip, resetQuipProgress } from '../lib/quips'
 import { getLevel, startMicAnalyser } from '../lib/audioReactive'
 import { toPlainText } from '../lib/plain'
@@ -185,31 +186,54 @@ export default function ChatPage() {
       if (jarvisEchoTimerRef.current) window.clearTimeout(jarvisEchoTimerRef.current)
       jarvisEchoTimerRef.current = window.setTimeout(() => setJarvisEcho(null), 3500)
     }
-    // 分句流水线：首句合成完即开播；单句合成失败/超时回退浏览器语音读该句
+    // 分句预取流水线：合成器持续预取后续句子，与播放重叠——消除句间空白。
+    // 单句合成失败标记 failed，由播放循环回退浏览器语音读该句；被打断则整链作废。
     const sentences = splitSentences(plain)
     void (async () => {
-      for (const sentence of sentences) {
+      const blobs: (Blob | 'failed' | undefined)[] = new Array(sentences.length)
+      let produced = 0
+
+      const produce = async () => {
+        while (produced < sentences.length && speakChainRef.current === chainId) {
+          const i = produced
+          try {
+            const blob = await tts(sentences[i], getPrefs().ttsVoice)
+            if (speakChainRef.current !== chainId) return
+            blobs[i] = blob
+          } catch {
+            if (speakChainRef.current !== chainId) return
+            blobs[i] = 'failed'
+          }
+          produced++
+        }
+      }
+      const producer = produce()
+
+      for (let i = 0; i < sentences.length; i++) {
         if (speakChainRef.current !== chainId) return
-        let played = false
-        try {
-          const blob = await tts(sentence, getPrefs().ttsVoice)
+        while (blobs[i] === undefined && speakChainRef.current === chainId) {
+          await new Promise((resolve) => setTimeout(resolve, 50))
+        }
+        if (speakChainRef.current !== chainId) return
+        const item = blobs[i]
+        if (item === 'failed' || item === undefined) {
+          // 该句合成失败：回退浏览器语音兜底
+          try { await speakFallback(sentences[i]) } catch { /* 被打断 */ }
           if (speakChainRef.current !== chainId) return
-          await playBlob(blob)
-          played = true
+          continue
+        }
+        try {
+          await playBlob(item)
         } catch (err) {
-          // 被打断（唤醒/新播报取代）：作废本链，待命恢复交给新链或 handleWake 的延迟兜底
           if (err instanceof Error && err.message === 'interrupted') {
             if (speakChainRef.current === chainId) speakChainRef.current = 0
             return
           }
         }
         if (speakChainRef.current !== chainId) return
-        if (!played) {
-          try { await speakFallback(sentence) } catch { /* 被打断 */ }
-          if (speakChainRef.current !== chainId) return
-        }
       }
       finish()
+      void producer
     })()
     // 安全网：链条异常卡死时按全文估算强制收尾
     if (voiceSafetyRef.current) window.clearTimeout(voiceSafetyRef.current)
@@ -322,7 +346,7 @@ export default function ChatPage() {
     speakReply(line)
   }, [speakReply])
   const handleConvoRef = useRef(handleConvo); handleConvoRef.current = handleConvo
-  const stopStandbyLocal = useCallback(() => { standbyOnRef.current = false; if (standbyTimerRef.current) window.clearTimeout(standbyTimerRef.current); standbyStopRef.current?.(); standbyStopRef.current = null; resetWakeState(); setStandbyOn(false); setStandbyLive(''); setWakeStatus('') }, [])
+  const stopStandbyLocal = useCallback((opts?: { keepConvo?: boolean }) => { standbyOnRef.current = false; if (standbyTimerRef.current) window.clearTimeout(standbyTimerRef.current); standbyStopRef.current?.(); standbyStopRef.current = null; resetWakeState(opts?.keepConvo ?? false); if (opts?.keepConvo) bumpConvoIdle(); setStandbyOn(false); setStandbyLive(''); setWakeStatus('') }, [])
   // 致命识别错误：不再假装监听，停掉待命并明确提示；瞬态错误（no-speech/aborted 等）由重挂自愈
   const handleStandbyError = useCallback((code: string) => {
     standbyErrorRef.current = code
@@ -338,6 +362,8 @@ export default function ChatPage() {
   const armStandby = useCallback(() => {
     standbyStopRef.current?.()
     standbyErrorRef.current = ''
+    // 播完恢复监听：会话模式存活则刷新闲置计时（长播报不把会话拖到超时）
+    if (isConvoActive()) bumpConvoIdle()
     // 传输层自动选择：桌面端且本地模型就绪 → sherpa-onnx 离线识别；否则回退浏览器 Web Speech
     const bridge = getDesktopBridge()
     const useLocal = !!bridge && bridge.asrAvailable()
@@ -362,7 +388,7 @@ export default function ChatPage() {
     standbyOnRef.current = true; setStandbyOn(true); setStandbyLive(''); setWakeStatus(useLocal ? '正在监听…（本地识别）' : '正在监听…')
   }, [])
   armStandbyRef.current = armStandby
-  standbyActionsRef.current = { pause: stopStandbyLocal, resume: armStandby }
+  standbyActionsRef.current = { pause: () => stopStandbyLocal({ keepConvo: true }), resume: armStandby }
 
   const stopVoiceReactive = useCallback(() => {
     voiceReactiveOnRef.current = false
@@ -619,6 +645,7 @@ export default function ChatPage() {
                       {message.content}
                       {message.isStreaming && <span className="type-cursor">▍</span>}
                     </div>
+                    {message.role === 'assistant' && <LearnProposalCard content={message.content} />}
                     {message.trace && message.trace.length > 0 && (
                       <>
                         <button

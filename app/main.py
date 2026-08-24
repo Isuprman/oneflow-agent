@@ -57,6 +57,14 @@ async def lifespan(app: FastAPI):
     _migrate_messages_reasoning()
     _migrate_schedules_notified()
     _migrate_user_memories_embedding()
+    # 自学习工具的外部 key 回注进程环境（重启后技能仍能取到 key）
+    from .learn.service import inject_saved_keys
+
+    with SessionLocal() as _db:
+        try:
+            inject_saved_keys(_db)
+        except Exception as _e:  # key 注入失败不阻断启动
+            print(f"[learn] 启动注入工具 key 失败(忽略): {_e}")
     # 后台调度引擎：定时任务执行 + 日程到期提醒（测试环境不启动，避免干扰）
     import sys
 
@@ -83,6 +91,7 @@ def health():
 
 
 from .routers import auth, briefing, chat, chat_stream, conversations, idle_hint, memories, notifications, tasks, tts
+from .routers import learn as learn_router
 from .routers import settings as settings_router  # noqa: E402,F401
 
 app.include_router(auth.router)
@@ -96,6 +105,7 @@ app.include_router(notifications.router)
 app.include_router(briefing.router)
 app.include_router(tasks.router)
 app.include_router(idle_hint.router)
+app.include_router(learn_router.router)
 
 # ---- 前端静态托管（仅在存在构建产物时启用，不影响纯 API 开发模式）----
 if (_FRONTEND_DIST / "assets").is_dir():

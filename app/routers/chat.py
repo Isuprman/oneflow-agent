@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from ..agent.engine import run_agent
 from ..db import get_db
 from ..deps import get_current_user
+from ..learn.hook import try_handle
 from ..models import Conversation, User
 from ..schemas import ChatRequest, ChatResponse
 from ..user_cfg import llm_configured
@@ -32,6 +33,11 @@ async def chat(
         db.commit()
         db.refresh(conv)
         conv_id = conv.id
+
+    # 自学习钩子：学习请求/审批指令不走 agent
+    learn_reply = await try_handle(db, user, conv_id, body.message)
+    if learn_reply is not None:
+        return ChatResponse(conversation_id=conv_id, reply=learn_reply, steps=0, trace=[])
 
     reply, steps, trace = await run_agent(db, user, conv_id, body.message)
     return ChatResponse(conversation_id=conv_id, reply=reply, steps=steps, trace=trace)

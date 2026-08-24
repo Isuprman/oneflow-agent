@@ -5,12 +5,36 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "models": "node scripts/download-models.js"
+    "models": "node scripts/download-models.js",
+    "prebuild": "node scripts/prebuild.js",
+    "dist": "npm run prebuild && electron-builder --mac dir"
   },
   "dependencies": {
     "sherpa-onnx-node": "^1.10.0"
   },
   "devDependencies": {
-    "electron": "^31.0.0"
+    "electron": "^31.0.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.oneflow.jarvis",
+    "productName": "OneFlow",
+    "asar": false,
+    "files": [
+      "main.js",
+      "preload.js",
+      "asr.js",
+      "icon.png",
+      "project-root.json",
+      "models/**"
+    ],
+    "mac": {
+      "target": [
+        "dir"
+      ]
+    },
+    "directories": {
+      "output": "release"
+    }
   }
 }

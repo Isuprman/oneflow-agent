@@ -65,3 +65,9 @@ def execute(name, args, user, db, cfg=None):
 # 注意：放文件底部以规避循环 import —— 各工具模块需要 `from .registry import tool`，
 # 若在顶部 import 工具模块，registry 尚未定义 tool 即会触发 ImportError。
 from . import weather, expense, schedule, calculator, hotel, scheduled, web
+
+# 自学习产出的技能（app/tools/skills/*.py），单个失败不影响其余
+try:
+    from . import skills as _skills  # noqa: F401  触发 load_skill_modules()
+except Exception as _e:  # 目录为空/个别文件损坏都不阻断启动
+    print(f"[skills] 技能加载跳过: {_e}")
