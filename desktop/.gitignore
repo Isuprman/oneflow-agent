@@ -1,4 +1,6 @@
 node_modules/
-models/
+release/
 dist/
+models/
+project-root.json
 *.log

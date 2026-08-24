@@ -187,6 +187,12 @@ const EXIT_PATTERNS = ['退下', '没事了', '没事儿了', '你先休息', '�
 const CONVO_IDLE_MS = 90000
 
 let convoState = { active: false, timer: null as number | null }
+let lastConvoCb: ConvoCallback | null = null
+
+/** 会话存活时刷新闲置计时（TTS 播报暂停期间防超时退出）。 */
+export function bumpConvoIdle(): void {
+  if (convoState.active) armConvoTimer(lastConvoCb ?? undefined)
+}
 
 export function isConvoActive(): boolean {
   return convoState.active
@@ -207,6 +213,7 @@ function armConvoTimer(onConvo?: ConvoCallback): void {
 
 function enterConvo(onConvo?: ConvoCallback): void {
   convoState.active = true
+  lastConvoCb = onConvo ?? null
   onConvo?.({ type: 'enter' })
   armConvoTimer(onConvo)
 }
@@ -308,13 +315,15 @@ export function getDesktopBridge(): DesktopBridge | null {
   return ((window as any).oneflowDesktop as DesktopBridge | undefined) ?? null
 }
 
-/** 归零唤醒状态（手动关闭待命时调用，之后需重新唤醒才能下指令）。 */
-export function resetWakeState(): void {
+/** 归零唤醒状态（手动关闭待命时调用，之后需重新唤醒才能下指令）。
+ *  keepConvo=true：TTS 播报暂停等临时场景——保留会话模式，播完恢复后继续免唤醒对话。 */
+export function resetWakeState(keepConvo = false): void {
   wakeState.woken = false
   wakeState.awaiting = false
   wakeState.wakeAt = 0
   wakeBuffer = ''
-  // 一并退出会话模式（静默，不触发告别播报）
+  // 一并退出会话模式（静默，不触发告别播报）；播报暂停场景保留会话
+  if (keepConvo && convoState.active) return
   if (convoState.timer !== null) {
     window.clearTimeout(convoState.timer)
     convoState.timer = null

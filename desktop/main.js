@@ -6,7 +6,17 @@ const http = require('http')
 const path = require('path')
 const fs = require('fs')
 
-const PROJECT_ROOT = path.join(__dirname, '..')
+// 项目根定位优先级：环境变量 > 打包时写入的 project-root.json > 开发模式相对路径
+function resolveProjectRoot() {
+  if (process.env.ONEFLOW_PROJECT_ROOT) return process.env.ONEFLOW_PROJECT_ROOT
+  try {
+    const conf = JSON.parse(fs.readFileSync(path.join(__dirname, 'project-root.json'), 'utf8'))
+    if (conf.root && fs.existsSync(conf.root)) return conf.root
+  } catch (_) { /* 打包未写或文件不存在，走开发模式 */ }
+  return path.join(__dirname, '..')
+}
+
+const PROJECT_ROOT = resolveProjectRoot()
 const BACKEND_PORT = 8020
 const APP_URL = `http://localhost:${BACKEND_PORT}`
 
@@ -23,12 +33,14 @@ const asr = require('./asr')
 // ---------- 后端管理 ----------
 
 function startBackend() {
-  const python = path.join(PROJECT_ROOT, '.venv', 'bin', 'uvicorn')
+  // 用 python -m uvicorn 而非 .venv/bin/uvicorn：后者是符号链接脚本，
+  // venv 迁移过机器时 shebang 会指向失效路径；-m 方式永远跟随当前解释器
+  const python = path.join(PROJECT_ROOT, '.venv', 'bin', 'python')
   if (!fs.existsSync(python)) {
-    console.error('[desktop] 找不到 .venv/bin/uvicorn，请先在项目根目录建好虚拟环境')
+    console.error('[desktop] 找不到 .venv/bin/python，请先在项目根目录建好虚拟环境')
     return
   }
-  backendProcess = spawn(python, ['app.main:app', '--port', String(BACKEND_PORT)], {
+  backendProcess = spawn(python, ['-m', 'uvicorn', 'app.main:app', '--port', String(BACKEND_PORT)], {
     cwd: PROJECT_ROOT,
     env: { ...process.env },
     stdio: 'inherit',
