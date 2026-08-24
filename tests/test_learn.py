@@ -239,8 +239,11 @@ def test_chat_learn_loop(client, db_session, git_repo, monkeypatch):
     uid_row = client.get("/api/auth/me", headers=headers).json()
     _setup_llm_config(db_session, uid_row["id"])
 
-    # ① 对话触发学习
+    # ① 对话触发学习 → 确认流：先回确认话术，用户「确认」后才构建
     resp = client.post("/api/chat", json={"message": "你要是能有个回显工具就好了"}, headers=headers)
+    assert resp.status_code == 200, resp.text
+    assert "确认一下" in resp.json()["reply"]
+    resp = client.post("/api/chat", json={"message": "确认"}, headers=headers)
     assert resp.status_code == 200, resp.text
     reply = resp.json()["reply"]
     assert "提案编号" in reply
@@ -266,6 +269,8 @@ def test_chat_learn_reject_loop(client, db_session, git_repo, monkeypatch):
     _setup_llm_config(db_session, uid_row["id"])
 
     resp = client.post("/api/chat", json={"message": "教你会回显吧"}, headers=headers)
+    assert "确认一下" in resp.json()["reply"]
+    resp = client.post("/api/chat", json={"message": "确认"}, headers=headers)
     match = _re.search(r"\[LEARN_PROPOSAL\](\{.*?\})\[\/LEARN_PROPOSAL\]", resp.json()["reply"])
     proposal_id = json.loads(match.group(1))["id"]
 
