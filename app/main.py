@@ -69,10 +69,21 @@ async def lifespan(app: FastAPI):
     import sys
 
     scheduler = None
+    mcp_cleanup = None
     if "pytest" not in sys.modules:
         from .scheduler import start_scheduler, shutdown_scheduler
 
         scheduler = start_scheduler()
+
+        # MCP 全局服务预连接：单个失败只 log，不拖垮启动（测试环境同样跳过）
+        from .mcp_client import shutdown_all as mcp_cleanup
+        from .mcp_client import startup_connect as mcp_startup_connect
+
+        with SessionLocal() as _mcp_db:
+            try:
+                mcp_startup_connect(_mcp_db)
+            except Exception as _e:  # noqa: S110  MCP 故障不影响主流程
+                print(f"[mcp] 启动连接失败(忽略): {_e}")
     try:
         yield
     finally:
@@ -80,6 +91,8 @@ async def lifespan(app: FastAPI):
             from .scheduler import shutdown_scheduler
 
             shutdown_scheduler(scheduler)
+        if mcp_cleanup is not None:
+            mcp_cleanup()
 
 
 app = FastAPI(title="OneFlow", version="0.1.0", lifespan=lifespan)
@@ -92,6 +105,7 @@ def health():
 
 from .routers import auth, briefing, chat, chat_stream, conversations, idle_hint, memories, notifications, tasks, tts, usage
 from .routers import learn as learn_router
+from .routers import mcp as mcp_router
 from .routers import settings as settings_router  # noqa: E402,F401
 
 app.include_router(auth.router)
@@ -106,6 +120,7 @@ app.include_router(briefing.router)
 app.include_router(tasks.router)
 app.include_router(idle_hint.router)
 app.include_router(learn_router.router)
+app.include_router(mcp_router.router)
 app.include_router(usage.router)
 
 # ---- 前端静态托管（仅在存在构建产物时启用，不影响纯 API 开发模式）----
