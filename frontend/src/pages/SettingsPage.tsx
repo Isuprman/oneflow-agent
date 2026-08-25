@@ -8,6 +8,54 @@ import { getPrefs, savePrefs, type VoicePrefs } from '../prefs'
 import { DEFAULT_LLM_BASE_URL, DEFAULT_LLM_MODEL, DEFAULT_LLM_PROVIDER, LLM_PROVIDERS } from '../theme/llmModels'
 import { TTS_VOICES } from '../theme/ttsVoices'
 
+// ─── 情境剧本：与 /api/scenes 直连的轻量客户端（仅本页使用，独立封装避免扩 API 层）───
+interface SceneInfo {
+  id: number
+  name: string
+  steps: string[]
+  step_count: number
+  enabled: boolean
+  created_at: string | null
+}
+interface SceneRunResult {
+  step: string
+  reply: string
+  success: boolean
+}
+
+async function scenesRequest<T>(path: string, init?: RequestInit): Promise<T> {
+  const token = localStorage.getItem('oneflow_token')
+  const res = await fetch(`/api/scenes${path}`, {
+    ...init,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(init?.headers ?? {}),
+    },
+  })
+  if (!res.ok) {
+    let detail = ''
+    try {
+      const data = (await res.json()) as { detail?: string }
+      detail = data.detail ?? ''
+    } catch {
+      detail = await res.text()
+    }
+    throw new Error(detail || `请求失败（HTTP ${res.status}）`)
+  }
+  if (res.status === 204) return undefined as T
+  return (await res.json()) as T
+}
+
+const listScenes = () => scenesRequest<SceneInfo[]>('')
+const createScene = (name: string, steps: string[]) =>
+  scenesRequest<SceneInfo>('', { method: 'POST', body: JSON.stringify({ name, steps }) })
+const toggleSceneApi = (id: number, enabled: boolean) =>
+  scenesRequest<SceneInfo>(`/${id}`, { method: 'PUT', body: JSON.stringify({ enabled }) })
+const deleteSceneApi = (id: number) => scenesRequest<void>(`/${id}`, { method: 'DELETE' })
+const runSceneApi = (id: number) =>
+  scenesRequest<SceneRunResult[]>(`/${id}/run`, { method: 'POST' })
+
 const PREF_ITEMS: Array<{ key: keyof VoicePrefs; label: string; desc: string }> = [
   { key: 'standby', label: '待命监听', desc: '唤醒词：贾维斯、小翼、你好小助手（同音字也能唤醒）；切换后返回聊天页生效' },
   { key: 'voice', label: '默认语音播报', desc: '助手回复自动朗读' },
@@ -88,6 +136,14 @@ export default function SettingsPage() {
   const [mcpUrl, setMcpUrl] = useState('')
   const [addingMcp, setAddingMcp] = useState(false)
   const [mcpBusyId, setMcpBusyId] = useState<number | null>(null)
+  // 情境剧本：预置指令集，聊天里发「场景 名字」或本页「立即执行」一键顺序跑
+  const [scenes, setScenes] = useState<SceneInfo[]>([])
+  const [sceneError, setSceneError] = useState('')
+  const [sceneName, setSceneName] = useState('')
+  const [sceneStepsText, setSceneStepsText] = useState('')
+  const [addingScene, setAddingScene] = useState(false)
+  const [sceneBusyId, setSceneBusyId] = useState<number | null>(null)
+  const [sceneToast, setSceneToast] = useState('')
 
   // MCP 状态徽章文案
   const MCP_STATUS_LABELS: Record<string, string> = {
@@ -149,6 +205,7 @@ export default function SettingsPage() {
     listNotifications(false).then(setNotes)
     loadProposals()
     loadMcpServers()
+    listScenes().then(setScenes).catch((reason: unknown) => setSceneError(reason instanceof Error ? reason.message : String(reason)))
   }, [])
 
   const selectProvider = (next: string) => {
@@ -255,6 +312,59 @@ export default function SettingsPage() {
       setMcpError(reason instanceof Error ? reason.message : String(reason))
     } finally {
       setMcpBusyId(null)
+    }
+  }
+  // ─── 情境剧本 ───────────────────────────────────────────────────
+  const showSceneToast = (message: string) => {
+    setSceneToast(message)
+    window.setTimeout(() => setSceneToast(''), 3000)
+  }
+  const addScene = async () => {
+    setAddingScene(true); setSceneError('')
+    try {
+      const steps = sceneStepsText.split('\n').map((line) => line.trim()).filter(Boolean)
+      const created = await createScene(sceneName.trim(), steps)
+      setScenes((previous) => [...previous, created])
+      setSceneName(''); setSceneStepsText('')
+      showSceneToast(`剧本「${created.name}」已保存（${created.step_count} 步）`)
+    } catch (reason) {
+      setSceneError(reason instanceof Error ? reason.message : String(reason))
+    } finally {
+      setAddingScene(false)
+    }
+  }
+  const toggleSceneItem = async (item: SceneInfo) => {
+    setSceneBusyId(item.id); setSceneError('')
+    try {
+      const updated = await toggleSceneApi(item.id, !item.enabled)
+      setScenes((previous) => previous.map((it) => (it.id === item.id ? updated : it)))
+    } catch (reason) {
+      setSceneError(reason instanceof Error ? reason.message : String(reason))
+    } finally {
+      setSceneBusyId(null)
+    }
+  }
+  const removeSceneItem = async (item: SceneInfo) => {
+    setSceneBusyId(item.id); setSceneError('')
+    try {
+      await deleteSceneApi(item.id)
+      setScenes((previous) => previous.filter((it) => it.id !== item.id))
+    } catch (reason) {
+      setSceneError(reason instanceof Error ? reason.message : String(reason))
+    } finally {
+      setSceneBusyId(null)
+    }
+  }
+  const executeScene = async (item: SceneInfo) => {
+    setSceneBusyId(item.id); setSceneError('')
+    try {
+      const results = await runSceneApi(item.id)
+      const ok = results.filter((result) => result.success).length
+      showSceneToast(`「${item.name}」执行完成：${ok}/${results.length} 步成功`)
+    } catch (reason) {
+      setSceneError(reason instanceof Error ? reason.message : String(reason))
+    } finally {
+      setSceneBusyId(null)
     }
   }
   const changeTtsVoice = (voiceId: string) => {
@@ -768,6 +878,95 @@ export default function SettingsPage() {
               onClick={() => void addServer()}
             >
               {addingMcp ? '连接中…' : '添加并连接'}
+            </button>
+          </div>
+        </section>
+
+        {/* 情境剧本：预置指令集，聊天里发「场景 名字」一键顺序执行 */}
+        <section className="section-card">
+          <HudCorners />
+          <header className="module-head">
+            <div>
+              <p className="module-head__kicker">SCENES</p>
+              <h2>情境剧本</h2>
+            </div>
+            <span className={`led ${scenes.some((s) => s.enabled) ? 'is-ready' : ''}`} aria-hidden="true" />
+          </header>
+          <p className="section-description">预置一串指令，在聊天里发「场景 名字」即可按顺序执行；单步失败不中断后续。</p>
+
+          {sceneError && <p className="error-note" role="alert">{sceneError}</p>}
+          {sceneToast && <p className="success-note">{sceneToast}</p>}
+          {scenes.length === 0 ? (
+            <p className="empty-copy">暂无情境剧本。在下方新建一个试试。</p>
+          ) : (
+            <ul className="memory-list">
+              {scenes.map((item) => (
+                <li className="memory-row" key={item.id}>
+                  <div className="memory-row__copy">
+                    <p>
+                      <strong>{item.name}</strong>{' '}
+                      <span className="ledger-hint">{item.step_count} 步</span>
+                    </p>
+                    <p>{item.steps[0]}{item.step_count > 1 ? ` …` : ''}</p>
+                  </div>
+                  <button
+                    type="button"
+                    className={`toggle-chip ${item.enabled ? 'is-on' : ''}`}
+                    style={{ padding: '4px 10px' }}
+                    disabled={sceneBusyId === item.id}
+                    onClick={() => void toggleSceneItem(item)}
+                  >
+                    <span className="toggle-chip__state">{item.enabled ? 'ON' : 'OFF'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="outline-button"
+                    disabled={sceneBusyId === item.id}
+                    onClick={() => void executeScene(item)}
+                  >
+                    立即执行
+                  </button>
+                  <button
+                    type="button"
+                    className="outline-button"
+                    disabled={sceneBusyId === item.id}
+                    onClick={() => void removeSceneItem(item)}
+                  >
+                    删除
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          <div className="ledger">
+            <div className="ledger-field">
+              <label htmlFor="scene-name">剧本名</label>
+              <input
+                id="scene-name"
+                value={sceneName}
+                onChange={(event) => setSceneName(event.target.value)}
+                placeholder="出差 / 晨间准备 ..."
+              />
+            </div>
+            <div className="ledger-field ledger-field--full">
+              <label htmlFor="scene-steps">步骤（每行一条指令，最多 10 行）</label>
+              <textarea
+                id="scene-steps"
+                rows={4}
+                value={sceneStepsText}
+                onChange={(event) => setSceneStepsText(event.target.value)}
+                placeholder={'查一下今天的天气\n汇总今天的日程'}
+              />
+            </div>
+          </div>
+          <div className="save-bar">
+            <button
+              className="primary-button"
+              disabled={addingScene || !sceneName.trim() || sceneStepsText.split('\n').filter((line) => line.trim()).length === 0}
+              onClick={() => void addScene()}
+            >
+              {addingScene ? '保存中…' : '保存剧本'}
             </button>
           </div>
         </section>

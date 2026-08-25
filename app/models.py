@@ -263,3 +263,18 @@ class McpServer(Base):
     env_json = Column(Text, default="{}")
     enabled = Column(Integer, default=1)
     created_at = Column(DateTime, default=now)
+
+
+class Scene(Base):
+    """情境剧本：用户预置的一串指令，聊天里发「场景 名字」即可按顺序一键执行。
+
+    steps 每行一条指令（最多 10 行）；enabled=0 时聊天钩子不命中、run 拒绝执行。
+    """
+    __tablename__ = "scenes"
+    __table_args__ = (UniqueConstraint("user_id", "name", name="uq_scene_user_name"),)
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    name = Column(String(64), nullable=False)
+    steps = Column(Text, nullable=False)             # 每行一条指令
+    enabled = Column(Integer, default=1)
+    created_at = Column(DateTime, default=now)

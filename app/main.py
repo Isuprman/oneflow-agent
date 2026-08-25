@@ -106,6 +106,7 @@ def health():
 from .routers import auth, briefing, chat, chat_stream, conversations, idle_hint, memories, notifications, tasks, tts, usage
 from .routers import learn as learn_router
 from .routers import mcp as mcp_router
+from .routers import scenes as scenes_router
 from .routers import settings as settings_router  # noqa: E402,F401
 
 app.include_router(auth.router)
@@ -121,6 +122,7 @@ app.include_router(tasks.router)
 app.include_router(idle_hint.router)
 app.include_router(learn_router.router)
 app.include_router(mcp_router.router)
+app.include_router(scenes_router.router)
 app.include_router(usage.router)
 from .routers import journal as journal_router
 app.include_router(journal_router.router)
