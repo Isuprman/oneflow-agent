@@ -87,6 +87,7 @@ async def build_tool(user_request: str, cfg: dict | None, repair_feedback: str |
                   {"role": "user", "content": user_content}],
         tools=[],
         cfg=cfg,
+        scene="learn_build",
     )
     if result.error or not result.text:
         return None, None

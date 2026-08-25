@@ -90,7 +90,7 @@ def health():
     return {"status": "ok", "llm_provider": settings.llm_provider, "llm_model": settings.llm_model}
 
 
-from .routers import auth, briefing, chat, chat_stream, conversations, idle_hint, memories, notifications, tasks, tts
+from .routers import auth, briefing, chat, chat_stream, conversations, idle_hint, memories, notifications, tasks, tts, usage
 from .routers import learn as learn_router
 from .routers import settings as settings_router  # noqa: E402,F401
 
@@ -106,6 +106,7 @@ app.include_router(briefing.router)
 app.include_router(tasks.router)
 app.include_router(idle_hint.router)
 app.include_router(learn_router.router)
+app.include_router(usage.router)
 
 # ---- 前端静态托管（仅在存在构建产物时启用，不影响纯 API 开发模式）----
 if (_FRONTEND_DIST / "assets").is_dir():

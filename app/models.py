@@ -231,3 +231,17 @@ class LearnSkillEmbedding(Base):
     created_at = Column(DateTime, default=now)
 
     __table_args__ = (UniqueConstraint("user_id", "slug", name="uq_learnembed_user_slug"),)
+
+
+class TokenUsage(Base):
+    """LLM token 用量流水：chat() 每次成功响应记一行，成本仪表盘按月按场景汇总。
+
+    user_id 可空：部分调用链暂无用户上下文，先记录总量、归属后续补齐。
+    """
+    __tablename__ = "token_usages"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True)
+    scene = Column(String(32), nullable=False, default="chat")   # chat / learn_build / habit / briefing…
+    prompt_tokens = Column(Integer, default=0)
+    completion_tokens = Column(Integer, default=0)
+    created_at = Column(DateTime, default=now)

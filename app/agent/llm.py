@@ -7,6 +7,8 @@ from typing import Awaitable, Callable, Optional
 import litellm
 
 from ..config import settings
+from ..db import SessionLocal
+from ..models import TokenUsage
 
 # 瞬时错误（网络抖动/限流/服务端 5xx）：自动重试一次再判定失败
 TRANSIENT_ERRORS = (
@@ -32,6 +34,9 @@ class LLMResult:
     reasoning_content: Optional[str] = None
     # True = 调用本身失败（错误提示不应落库进历史）；False = 正常回复/提示
     error: bool = False
+    # 本次响应的 token 用量（厂商未返回时为 None）
+    prompt_tokens: Optional[int] = None
+    completion_tokens: Optional[int] = None
 
 
 # 流式文本增量回调（可同步可异步）
@@ -58,6 +63,22 @@ def _extract_reasoning(msg) -> Optional[str]:
     return reasoning
 
 
+def _parse_usage(usage) -> tuple[Optional[int], Optional[int]]:
+    """解析 usage 对象里的 token 数：各厂商字段不一（OpenAI 风格为主，
+    兼容 input/output_tokens 命名与 dict 形态），取不到返回 (None, None)。"""
+    if usage is None:
+        return None, None
+
+    def _num(*names: str) -> Optional[int]:
+        for n in names:
+            v = usage.get(n) if isinstance(usage, dict) else getattr(usage, n, None)
+            if isinstance(v, (int, float)):
+                return int(v)
+        return None
+
+    return _num("prompt_tokens", "input_tokens"), _num("completion_tokens", "output_tokens")
+
+
 def _delta_reasoning(delta) -> Optional[str]:
     """从流式 chunk.delta 提取思维链增量（思考模型流式同样带 reasoning_content）。"""
     reasoning = getattr(delta, "reasoning_content", None)
@@ -78,11 +99,18 @@ async def _notify(callback: Optional[DeltaCallback], text: str) -> None:
 
 
 async def _consume_stream(resp, on_delta: Optional[DeltaCallback]) -> LLMResult:
-    """汇聚流式响应：正文增量实时回调，工具调用分片拼接，思维链静默累积。"""
+    """汇聚流式响应：正文增量实时回调，工具调用分片拼接，思维链静默累积。
+
+    部分 provider 会在最后一个 chunk 附带 usage（choices 为空），一并捕获。
+    """
     content_parts: list[str] = []
     reasoning_parts: list[str] = []
     call_acc: dict[int, dict] = {}
+    stream_usage = None
     async for chunk in resp:
+        chunk_usage = getattr(chunk, "usage", None)
+        if chunk_usage is not None:
+            stream_usage = chunk_usage
         choices = getattr(chunk, "choices", None) or []
         if not choices:
             continue
@@ -106,6 +134,7 @@ async def _consume_stream(resp, on_delta: Optional[DeltaCallback]) -> LLMResult:
                 if getattr(fn, "arguments", None):
                     acc["arguments"] += fn.arguments
     reasoning = "".join(reasoning_parts) or None
+    prompt_tokens, completion_tokens = _parse_usage(stream_usage)
     if call_acc:
         first = call_acc[min(call_acc)]
         try:
@@ -115,8 +144,35 @@ async def _consume_stream(resp, on_delta: Optional[DeltaCallback]) -> LLMResult:
         return LLMResult(
             tool_call=ToolCall(name=first["name"], arguments=arguments),
             reasoning_content=reasoning,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
         )
-    return LLMResult(text="".join(content_parts), reasoning_content=reasoning)
+    return LLMResult(
+        text="".join(content_parts),
+        reasoning_content=reasoning,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+    )
+
+
+def _record_usage(scene: str, user_id: Optional[int], result: LLMResult) -> None:
+    """token 用量落库（尽力而为）：厂商没返回 usage 就跳过；任何异常都吞掉，绝不影响主流程。"""
+    if result.prompt_tokens is None and result.completion_tokens is None:
+        return
+    try:
+        db = SessionLocal()
+        try:
+            db.add(TokenUsage(
+                user_id=user_id,
+                scene=scene or "chat",
+                prompt_tokens=int(result.prompt_tokens or 0),
+                completion_tokens=int(result.completion_tokens or 0),
+            ))
+            db.commit()
+        finally:
+            db.close()
+    except Exception:
+        pass
 
 
 async def chat(
@@ -124,12 +180,15 @@ async def chat(
     tools: list,
     cfg: dict | None = None,
     on_delta: DeltaCallback | None = None,
+    scene: str = "chat",
+    user_id: int | None = None,
 ) -> LLMResult:
     """调用 LLM。支持 function calling，返回 LLMResult（text 或 tool_call）。
 
     cfg 为每用户配置（可含 provider/model/api_key/base_url），覆盖全局默认。
     on_delta 非空时启用真流式：正文增量实时回调（工具调用轮不回调）。
-    调用失败（重试后仍失败）返回 error=True 的 LLMResult，调用方不应将其落库。
+    scene/user_id 用于 token 用量埋点：响应成功后记一行 TokenUsage（取不到 usage 则跳过，
+    埋点失败不影响主流程）。调用失败（重试后仍失败）返回 error=True 的 LLMResult，调用方不应将其落库。
     """
     effective_key = (cfg.get("api_key") if cfg else None) or settings.llm_api_key
     if not effective_key:
@@ -157,18 +216,31 @@ async def chat(
             await asyncio.sleep(1.0)
             resp = await litellm.acompletion(**kwargs)
         if on_delta is not None:
-            return await _consume_stream(resp, on_delta)
-        msg = resp.choices[0].message
-        reasoning = _extract_reasoning(msg)
-        if msg.tool_calls and len(msg.tool_calls) > 0:
-            tc = msg.tool_calls[0]
-            return LLMResult(
-                tool_call=ToolCall(
-                    name=tc.function.name,
-                    arguments=json.loads(tc.function.arguments or "{}"),
-                ),
-                reasoning_content=reasoning,
-            )
-        return LLMResult(text=msg.content or "", reasoning_content=reasoning)
+            result = await _consume_stream(resp, on_delta)
+        else:
+            msg = resp.choices[0].message
+            reasoning = _extract_reasoning(msg)
+            prompt_tokens, completion_tokens = _parse_usage(getattr(resp, "usage", None))
+            if msg.tool_calls and len(msg.tool_calls) > 0:
+                tc = msg.tool_calls[0]
+                result = LLMResult(
+                    tool_call=ToolCall(
+                        name=tc.function.name,
+                        arguments=json.loads(tc.function.arguments or "{}"),
+                    ),
+                    reasoning_content=reasoning,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                )
+            else:
+                result = LLMResult(
+                    text=msg.content or "",
+                    reasoning_content=reasoning,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                )
+        # 用量埋点：内部自吞异常，失败不影响本次调用结果
+        _record_usage(scene, user_id, result)
+        return result
     except Exception as e:
         return LLMResult(text=f"LLM 调用出错: {e}", error=True)
