@@ -230,6 +230,16 @@ async def tick() -> None:
             except Exception as e:
                 db.rollback()
                 notify_system_error(db, f"习惯提案生成失败（{e}）")
+            # 21 点后顺带：上线技能质量反馈环（差评自动降级 / 好评一次性通知）
+            try:
+                import asyncio
+
+                from .learn.habit import run_skill_quality_check
+
+                asyncio.run(run_skill_quality_check(db))
+            except Exception as e:
+                db.rollback()
+                notify_system_error(db, f"技能质量检查失败（{e}）")
     finally:
         db.close()
 
