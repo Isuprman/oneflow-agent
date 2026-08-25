@@ -245,3 +245,21 @@ class TokenUsage(Base):
     prompt_tokens = Column(Integer, default=0)
     completion_tokens = Column(Integer, default=0)
     created_at = Column(DateTime, default=now)
+
+
+class McpServer(Base):
+    """MCP server 配置：连接成功后其工具自动注册进全局工具表（命名空间 mcp_<server>_<tool>）。
+
+    user_id 可空 = 全局共享（当前桌面单机场景统一建全局行，列保留供未来按用户隔离）。
+    command 与 url 二选一：stdio 子进程 / streamable HTTP 端点。
+    env_json 为 JSON 对象字符串，如 {"API_KEY": "sk-..."}，透传给子进程环境。
+    """
+    __tablename__ = "mcp_servers"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True)
+    name = Column(String(64), unique=True, nullable=False)
+    command = Column(String(255), default="")
+    url = Column(String(512), default="")
+    env_json = Column(Text, default="{}")
+    enabled = Column(Integer, default=1)
+    created_at = Column(DateTime, default=now)
