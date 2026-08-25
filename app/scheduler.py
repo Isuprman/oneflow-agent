@@ -220,6 +220,16 @@ async def tick() -> None:
             except Exception as e:
                 db.rollback()
                 notify_system_error(db, f"习惯洞察失败（{e}）")
+            # 21 点后顺带：习惯 → 技能提案（经验结晶，走既有审批流）
+            try:
+                import asyncio
+
+                from .learn.habit import run_daily_proposals
+
+                asyncio.run(run_daily_proposals(db))
+            except Exception as e:
+                db.rollback()
+                notify_system_error(db, f"习惯提案生成失败（{e}）")
     finally:
         db.close()
 

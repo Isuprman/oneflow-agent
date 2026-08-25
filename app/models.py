@@ -209,6 +209,17 @@ class LearnKey(Base):
     __table_args__ = (UniqueConstraint("user_id", "key_name", name="uq_learnkey_user_name"),)
 
 
+class HabitDismissed(Base):
+    """夜间习惯提案的免打扰记录：用户拒绝过的模式不再重复提议。"""
+    __tablename__ = "habit_dismissed"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    pattern_hash = Column(String(32), nullable=False)
+    created_at = Column(DateTime, default=now)
+
+    __table_args__ = (UniqueConstraint("user_id", "pattern_hash", name="uq_habitdismiss_user_pattern"),)
+
+
 class LearnSkillEmbedding(Base):
     """已上线技能的语义索引（slug + 描述 + 向量），相似请求复用而非重建。"""
     __tablename__ = "learn_skill_embeddings"
