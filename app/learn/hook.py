@@ -3,6 +3,7 @@
 # 支持的说法：
 #   学习请求：「你要是能查快递就好了」「教你会翻译古文」「给自己加个记账工具」
 #   审批指令：「批准 12」「拒绝 12」「key 12 DEMO_API_KEY=sk-xxx」
+#   面试回答：「面试 你的回答」（反向面试的回复通道）
 #
 # 学习请求走两段式确认：首次命中先做 ASR 纠错并复述，等用户确认后才真正构建；
 # 构建期间通过 on_progress 向流式接口直播进度。
@@ -93,7 +94,13 @@ def is_learn_message(text: str) -> bool:
     待确认状态的跟进消息（确认/取消/纠正）不经过这里——路由侧用 pending_intents 判断。
     """
     t = text.strip()
-    return bool(_ACQUIRE_RE.search(t) or _APPROVE_RE.match(t) or _REJECT_RE.match(t) or _KEY_RE.match(t))
+    return bool(
+        t.startswith("面试 ")
+        or _ACQUIRE_RE.search(t)
+        or _APPROVE_RE.match(t)
+        or _REJECT_RE.match(t)
+        or _KEY_RE.match(t)
+    )
 
 
 def _llm_cfg(db, user: User) -> dict:
@@ -135,6 +142,14 @@ async def try_handle(db, user: User, conversation_id: int, user_msg: str, on_pro
     on_progress: 构建各阶段的进度回调（str -> None），供流式接口直播。
     """
     text = user_msg.strip()
+
+    # ── 面试回答：「面试 」前缀直达反向面试闭环（handle_answer 同步，to_thread 包裹）──
+    if text.startswith("面试 ") and len(text) > 3:
+        from . import interview
+
+        reply = await asyncio.to_thread(interview.handle_answer, db, user, text[len("面试 "):])
+        _save_pair(db, conversation_id, user_msg, reply)
+        return reply
 
     # ── 待确认流：优先于一切意图检测（审批指令除外）──
     entry = pending_intents.get(user.id)
