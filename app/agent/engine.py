@@ -4,6 +4,7 @@ import json
 
 from ..config import settings
 from ..db import SessionLocal  # noqa: F401  保持与规范一致的依赖导入
+from ..learn.hook import get_trust_level
 from ..models import Message, PendingAction, ToolCallLog, UserMemory
 from ..tools.registry import execute, needs_confirmation, schemas
 from . import llm as llm_mod
@@ -13,6 +14,27 @@ from .prompts import SYSTEM_PROMPT
 # 确认/取消口令（语音场景下宽松匹配前缀）
 CONFIRM_PHRASES = ("确认", "是的", "好的", "对", "可以", "没问题", "执行", "嗯", "要")
 CANCEL_PHRASES = ("取消", "不要", "算了", "不用")
+
+# auto 档下仍强制确认的高危操作：删除类不可逆操作。
+# 新增不可恢复的写操作时在此登记；普通写操作（记账/定时任务增删）auto 档直接放行。
+HIGH_RISK_TOOLS = frozenset({"delete_custom_agent"})
+
+
+def _needs_confirm(tool_name: str, trust_level: str) -> bool:
+    """按信任等级决定工具调用是否进确认分支。
+
+    ask_all：每个工具调用前都确认（复用高危 pending 机制）；
+    standard：现状——仅高危写操作（requires_confirm）确认；
+    auto：普通写操作直接执行，删除类高危仍强制确认。
+    delegate 始终除外：由引擎异步委派，进 pending 会导致确认后 execute 失败。
+    """
+    if tool_name == "delegate":
+        return False
+    if trust_level == "ask_all":
+        return True
+    if not needs_confirmation(tool_name):
+        return False
+    return trust_level != "auto" or tool_name in HIGH_RISK_TOOLS
 
 
 def _is_confirm(text: str) -> bool:
@@ -121,6 +143,8 @@ async def run_agent(
     from ..user_cfg import get_llm_cfg
 
     cfg = get_llm_cfg(db, user.id)
+    # 信任旋钮：本回合内工具调用是否进确认分支（学习提案审批不受影响）
+    trust_level = get_trust_level(db, user.id)
 
     # 1.5 高危操作确认流程：上轮有 pending 时，本轮先处理确认/取消
     pending = (
@@ -251,8 +275,8 @@ async def run_agent(
 
         if res.tool_call is not None:
             tc = res.tool_call
-            # 高危写操作：不直接执行，暂存 pending 并向用户要确认
-            if tc.name != "delegate" and needs_confirmation(tc.name):
+            # 信任旋钮决定是否拦截：不直接执行，暂存 pending 并向用户要确认
+            if _needs_confirm(tc.name, trust_level):
                 summary = _pending_summary(tc.name, tc.arguments)
                 db.query(PendingAction).filter(
                     PendingAction.user_id == user.id,

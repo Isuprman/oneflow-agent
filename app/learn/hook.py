@@ -12,7 +12,7 @@ import json
 import re
 import time
 
-from ..models import Message, User
+from ..models import Message, User, UserSetting
 from . import service
 
 # 触发词保守列表：宁可不触发也不误劫持正常聊天
@@ -106,6 +106,27 @@ def _llm_cfg(db, user: User) -> dict:
         "api_key": cfg_map.get("llm.api_key"),
         "base_url": cfg_map.get("llm.base_url"),
     }
+
+
+# ── 信任旋钮：用户可调的自治等级（engine 工具确认分支读取）──
+TRUST_KEY = "trust.level"
+TRUST_LEVELS = ("ask_all", "standard", "auto")
+TRUST_DEFAULT = "standard"
+
+
+def get_trust_level(db, user_id: int) -> str:
+    """读取用户信任等级；未设置或值非法一律回退 standard。
+
+    注意：学习提案审批不读此值——无论哪一档，提案「批准/拒绝」永不跳过。
+    """
+    row = (
+        db.query(UserSetting)
+        .filter(UserSetting.user_id == user_id, UserSetting.key == TRUST_KEY)
+        .first()
+    )
+    if row is not None and row.value in TRUST_LEVELS:
+        return row.value
+    return TRUST_DEFAULT
 
 
 async def try_handle(db, user: User, conversation_id: int, user_msg: str, on_progress=None):
