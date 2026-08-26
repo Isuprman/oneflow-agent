@@ -10,6 +10,7 @@ from ..agent.engine import run_agent
 from ..db import get_db
 from ..deps import get_current_user
 from ..learn.hook import is_learn_message, pending_intents, try_handle
+from ..learn.shadow import CONFIRM_PREFIX, confirm_scene, note_and_maybe_propose
 from ..models import Conversation, Scene, User
 from ..schemas import ChatRequest
 from ..user_cfg import llm_configured
@@ -93,6 +94,17 @@ async def chat_stream(
         db.refresh(conv)
         conv_id = conv.id
 
+    # ── 影子模式：fire-and-forget 记录本条指令，命中阈值时发「存为剧本」提议通知 ──
+    #    确认指令本身不入轨（避免混进步骤）；异常静默，不阻塞流。
+    async def _shadow_note():
+        try:
+            if not body.message.strip().startswith(CONFIRM_PREFIX):
+                note_and_maybe_propose(db, conv_id, user.id, body.message)
+        except Exception:
+            db.rollback()
+
+    asyncio.create_task(_shadow_note())
+
     async def event_gen():
         queue: asyncio.Queue = asyncio.Queue()
 
@@ -164,6 +176,17 @@ async def chat_stream(
                     "trace": [],
                 })
                 return
+
+        # ── 影子模式确认钩子：「存为剧本」→ 把本会话流程落成情境剧本（agent 之前接管）──
+        if body.message.strip().startswith(CONFIRM_PREFIX):
+            shadow_reply = confirm_scene(db, user, conv_id)
+            yield _sse("done", {
+                "conversation_id": conv_id,
+                "reply": shadow_reply,
+                "steps": 0,
+                "trace": [],
+            })
+            return
 
         async def on_event(event: dict) -> None:
             await queue.put(_sse_from_event(event))
