@@ -139,9 +139,14 @@ app.include_router(mcp_router.router)
 app.include_router(scenes_router.router)
 app.include_router(usage.router)
 from .routers import journal as journal_router
+from .routers import market as market_router
+
 app.include_router(journal_router.router)
 from .routers import privacy as privacy_router
+from .routers import market as market_router
+
 app.include_router(privacy_router.router)
+app.include_router(market_router.router)
 
 # ---- 前端静态托管（仅在存在构建产物时启用，不影响纯 API 开发模式）----
 if (_FRONTEND_DIST / "assets").is_dir():

@@ -267,6 +267,63 @@ def approve_proposal(db: Session, user: User, proposal: SkillProposal, keys: dic
     return {"ok": True, **info}
 
 
+def install_skill(db: Session, user: User, source: SkillProposal) -> SkillProposal:
+    """从技能市场安装：门禁+沙箱重验 → 复制为本用户提案 → 批准上线。
+
+    复用既有逻辑：static_gate（门禁）、run_tests（沙箱）、commit_candidate（候选分支）、
+    approve_proposal（合并+热激活）。缺外部 key 时保持 pending，走既有审批流补 key。
+    """
+    from . import gate
+    from .sandbox import run_tests
+
+    errors, _warnings = gate.static_gate(source.tool_code or "", source.test_code or "")
+    if errors:
+        raise LearnError("目标技能未通过静态门禁: " + "; ".join(errors))
+    passed, output = run_tests(source.tool_code or "", source.test_code or "", source.slug or "cand")
+    if not passed:
+        raise LearnError(f"目标技能沙箱重验未通过: {output[-300:]}")
+
+    slug = source.slug or ""
+    if gate.check_slug(slug):
+        raise LearnError("目标技能 slug 不合法，无法安装")
+
+    log = "来源：技能市场安装\n门禁通过；沙箱重验通过。\n" + output
+    # 目标技能已在本机仓库上线且内容一致 → 无需建分支合并，直接记录归属
+    existing_file = PROJECT_ROOT / "app" / "tools" / "skills" / f"{slug}.py"
+    same_content = existing_file.exists() and existing_file.read_text(encoding="utf-8") == (source.tool_code or "")
+    branch = ""
+    if not same_content:
+        branch = commit_candidate(slug, source.tool_code, source.test_code)
+        log += f"\n候选已提交到分支 {branch}"
+
+    desc = (source.description or "").strip()
+    proposal = SkillProposal(
+        user_id=user.id, slug=slug, title=source.title or slug,
+        description=f"从技能市场安装：{desc}" if desc else "从技能市场安装",
+        status="pending", tool_code=source.tool_code, test_code=source.test_code,
+        test_output=log[-4000:],
+        required_keys=json.dumps(gate.extract_required_keys(source.tool_code or ""), ensure_ascii=False),
+        branch=branch,
+    )
+    db.add(proposal)
+    db.commit()
+    db.refresh(proposal)
+
+    if same_content:
+        proposal.status = "approved"
+        db.commit()
+        return proposal
+
+    try:
+        result = approve_proposal(db, user, proposal, {})
+        if result.get("ok"):
+            return proposal
+        # 缺 key：保持 pending，由既有审批流补 key 后上线
+    except LearnError:
+        pass  # 分支异常等情况：保持 pending 供用户处置
+    return proposal
+
+
 def reject_proposal(db: Session, user: User, proposal: SkillProposal) -> None:
     if proposal.user_id != user.id:
         raise LearnError("只能操作自己的提案")

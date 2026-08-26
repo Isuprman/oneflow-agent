@@ -255,6 +255,14 @@ async def tick() -> None:
             except Exception as e:
                 db.rollback()
                 notify_system_error(db, f"反向面试失败（{e}）")
+            # 21 点后顺带：年度体检（每周最多一次，抽样金题 + 直接重放打分 + 通知）
+            try:
+                from .learn.checkup import run_weekly_checkups
+
+                run_weekly_checkups(db)
+            except Exception as e:
+                db.rollback()
+                notify_system_error(db, f"年度体检失败（{e}）")
     finally:
         db.close()
 
