@@ -207,6 +207,15 @@ async def tick() -> None:
             db.rollback()
             notify_system_error(db, f"日程提醒检查失败（{e}）")
 
+        # 数字分身：外出规则由 LLM 判定此刻是否需要动作，是则执行并留回放通知
+        try:
+            from .learn.companion import run_away_rules
+
+            await run_away_rules(db)
+        except Exception as e:
+            db.rollback()
+            notify_system_error(db, f"数字分身检查失败（{e}）")
+
         # 每晚 20 点后：情景关怀（每人每天一次）；21 点后：习惯洞察
         if now.hour >= CARE_HOUR:
             try:
