@@ -278,3 +278,17 @@ class Scene(Base):
     steps = Column(Text, nullable=False)             # 每行一条指令
     enabled = Column(Integer, default=1)
     created_at = Column(DateTime, default=now)
+
+
+class AwayRule(Base):
+    """数字分身规则：用户外出（「我不在」）时留下的待办规则。
+
+    调度器每 tick 检查 enabled=1 的规则，由 LLM 判定此刻是否需要动作（如日程变更），
+    是则执行并留「数字分身代劳」通知；每规则每天最多动作一次。
+    """
+    __tablename__ = "away_rules"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    rule_text = Column(Text, nullable=False)
+    enabled = Column(Integer, default=1)
+    created_at = Column(DateTime, default=now)

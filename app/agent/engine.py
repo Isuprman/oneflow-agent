@@ -126,6 +126,7 @@ async def run_agent(
     user_msg: str,
     on_event=None,
     stream: bool = False,
+    bypass_away: bool = False,
 ) -> tuple[str, int, list[dict]]:
     """执行一个 agent 回合。
 
@@ -134,6 +135,7 @@ async def run_agent(
 
     on_event：过程事件回调（tool_call/tool_result/delta/error），供 SSE 真流式透传。
     stream：为 True 时最终回复逐 token 以 delta 事件实时推出。
+    bypass_away：为 True 时跳过数字分身指令接管（分身执行规则时用，避免规则文本被再次当成规则录入）。
     """
     # 1. 先在 DB 加一条 user 消息
     db.add(Message(conversation_id=conversation_id, role="user", content=user_msg))
@@ -145,6 +147,16 @@ async def run_agent(
     cfg = get_llm_cfg(db, user.id)
     # 信任旋钮：本回合内工具调用是否进确认分支（学习提案审批不受影响）
     trust_level = get_trust_level(db, user.id)
+
+    # 1.2 数字分身：我不在 / 我回来了 / 外出期间规则录入 —— 不经 LLM，直接接管
+    if not bypass_away:
+        from ..learn.companion import try_handle_away_command
+
+        away_reply = try_handle_away_command(db, user, conversation_id, user_msg)
+        if away_reply is not None:
+            db.add(Message(conversation_id=conversation_id, role="assistant", content=away_reply))
+            db.commit()
+            return away_reply, 0, []
 
     # 1.5 高危操作确认流程：上轮有 pending 时，本轮先处理确认/取消
     pending = (
@@ -201,10 +213,17 @@ async def run_agent(
     messages = history
     tools = _tool_schemas(db, user.id)
 
+    # 3.4 情绪感知：用户消息进 agent 前做轻量分类（10 分钟缓存），
+    #     frustrated/tired 时收紧回复姿态（回复减半、去掉俏皮话与反问、直接给结论）
+    from ..learn.companion import classify_mood, mood_system_suffix
+
+    mood = await classify_mood(user_msg, cfg, user.id)
+
     # 3.5 注入画像 + 语义召回的长期记忆（无向量时自动回退最近 20 条）
     from ..tools.profile import load_profile
 
     system_text = SYSTEM_PROMPT
+    system_text += mood_system_suffix(mood)
     profile = load_profile(db, user.id)
     if profile:
         system_text += "\n\n【用户画像】\n" + "\n".join(f"- {k}: {v}" for k, v in profile.items())
