@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { MotionConfig, AnimatePresence, motion, type Variants } from 'framer-motion'
 import { createConversation, getMessages, getIdleHint, listConversations, listNotifications, markNotificationRead, streamChat, tts, type StreamStep } from '../api/client'
 import LearnProposalCard from '../components/LearnProposalCard'
@@ -585,6 +585,25 @@ export default function ChatPage() {
           )}
         </AnimatePresence>
         <TelemetryStrip sessionId={activeId} status={sysStatus} />
+        {/* 成长档案入口：左上角玻璃徽标（与右上角回显对称），跳转 /journal */}
+        <Link
+          className="hud-action"
+          to="/journal"
+          style={{ position: 'absolute', top: 18, left: 24, zIndex: 40, display: 'inline-flex', alignItems: 'center', gap: 8 }}
+        >
+          <span
+            aria-hidden="true"
+            style={{
+              width: 7,
+              height: 7,
+              flex: 'none',
+              border: '1px solid rgba(56,189,248,.65)',
+              boxShadow: '0 0 6px rgba(56,189,248,.4)',
+              transform: 'rotate(45deg)',
+            }}
+          />
+          成长档案
+        </Link>
         <HoloTray
           open={trayOpen}
           onToggle={() => setTrayOpen((value) => !value)}

@@ -3,6 +3,7 @@ import ChatPage from './pages/ChatPage'
 import LoginPage from './pages/LoginPage'
 import RegisterPage from './pages/RegisterPage'
 import SettingsPage from './pages/SettingsPage'
+import GrowthJournal from './components/GrowthJournal'
 import { useAuthStore } from './store/auth'
 
 function ProtectedRoute() {
@@ -21,6 +22,7 @@ export default function App() {
       <Route element={<ProtectedRoute />}>
         <Route path="/" element={<ChatPage />} />
         <Route path="/settings" element={<SettingsPage />} />
+        <Route path="/journal" element={<GrowthJournal />} />
         <Route path="*" element={<ChatPage />} />
       </Route>
     </Routes>
