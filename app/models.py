@@ -139,8 +139,10 @@ class UserMemory(Base):
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     content = Column(Text, nullable=False)
     embedding = Column(Text)                     # JSON 向量（云端 embedding），语义召回用
+    status = Column(String(16), default="active", nullable=False)   # active / superseded（被新记忆推翻）
     created_at = Column(DateTime, default=now)
     updated_at = Column(DateTime, default=now, onupdate=now)
+    last_accessed = Column(DateTime, default=now)                   # 读时更新，遗忘衰减用
     user = relationship("User", back_populates="memories")
 
 
