@@ -51,12 +51,26 @@ def _migrate_user_memories_embedding() -> None:
             conn.execute(text("ALTER TABLE user_memories ADD COLUMN embedding TEXT"))
 
 
+def _migrate_user_memories_cognition() -> None:
+    """老库补齐 user_memories.status / last_accessed 列：冲突消解标记与遗忘衰减。"""
+    inspector = inspect(engine)
+    if "user_memories" not in inspector.get_table_names():
+        return
+    columns = {c["name"] for c in inspector.get_columns("user_memories")}
+    with engine.begin() as conn:
+        if "status" not in columns:
+            conn.execute(text("ALTER TABLE user_memories ADD COLUMN status TEXT DEFAULT 'active'"))
+        if "last_accessed" not in columns:
+            conn.execute(text("ALTER TABLE user_memories ADD COLUMN last_accessed DATETIME"))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
     _migrate_messages_reasoning()
     _migrate_schedules_notified()
     _migrate_user_memories_embedding()
+    _migrate_user_memories_cognition()
     # 自学习工具的外部 key 回注进程环境（重启后技能仍能取到 key）
     from .learn.service import inject_saved_keys
 
