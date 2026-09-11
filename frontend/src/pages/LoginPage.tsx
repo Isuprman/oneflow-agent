@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import type { FormEvent } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { login, me } from '../api/client'
+import { login, me } from '../api/auth'
 import AuthFrame from '../components/AuthFrame'
 import { useAuthStore } from '../store/auth'
 
