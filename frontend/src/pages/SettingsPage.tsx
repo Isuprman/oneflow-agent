@@ -1,17 +1,16 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { addMcpServer, deleteMcpServer, listMcpServers, refreshMcpServer, toggleMcpServer, type McpServerOut } from '../api/mcp'
-import { listLearnProposals, type LearnProposalOut } from '../api/learn'
-import { deleteMemory, listMemories } from '../api/memories'
-import { deleteNotification, listNotifications } from '../api/notifications'
-import { deleteTask, listTasks, updateTask } from '../api/tasks'
-import type { AppNotification, Memory, TaskInfo } from '../api/types'
 import ParticleField from '../components/ParticleField'
 import HudCorners from '../components/HudCorners'
-import { formatTime, truncateText } from './settings/shared'
+import { truncateText } from './settings/shared'
 import LlmSection from './settings/LlmSection'
 import HotelSection from './settings/HotelSection'
 import VoiceSection from './settings/VoiceSection'
+import TasksSection from './settings/TasksSection'
+import NotificationsSection from './settings/NotificationsSection'
+import MemoriesSection from './settings/MemoriesSection'
+import SkillsSection from './settings/SkillsSection'
 
 // ─── 情境剧本：与 /api/scenes 直连的轻量客户端（仅本页使用，独立封装避免扩 API 层）───
 interface SceneInfo {
@@ -61,16 +60,6 @@ const deleteSceneApi = (id: number) => scenesRequest<void>(`/${id}`, { method: '
 const runSceneApi = (id: number) =>
   scenesRequest<SceneRunResult[]>(`/${id}/run`, { method: 'POST' })
 
-// 通知类型 → 中文标签
-const NOTE_KIND_LABELS: Record<string, string> = {
-  task: '定时播报',
-  reminder: '日程提醒',
-  care: '情景关怀',
-  habit: '习惯洞察',
-  system_error: '系统自检',
-}
-const WEEKDAY_LABELS = ['', '周一', '周二', '周三', '周四', '周五', '周六', '周日']
-
 // 信任等级：贾维斯的自治程度（本机偏好；后端以 trust.level 设置为准，默认 standard）
 type TrustLevel = 'ask_all' | 'standard' | 'auto'
 const TRUST_STORAGE_KEY = 'oneflow_trust_level'
@@ -91,18 +80,6 @@ function getTrustLevel(): TrustLevel {
 }
 
 export default function SettingsPage() {
-  const [memories, setMemories] = useState<Memory[]>([])
-  const [memoryError, setMemoryError] = useState('')
-  const [deletingId, setDeletingId] = useState<number | null>(null)
-  // 定时任务管理（不含晨间简报，它有专属开关）
-  const [tasks, setTasks] = useState<TaskInfo[]>([])
-  const [taskError, setTaskError] = useState('')
-  // 通知中心（历史全量）
-  const [notes, setNotes] = useState<AppNotification[]>([])
-  // 技能工厂：自学习提案状态总览
-  const [proposals, setProposals] = useState<LearnProposalOut[]>([])
-  const [proposalsLoading, setProposalsLoading] = useState(true)
-  const [proposalsError, setProposalsError] = useState('')
   // 信任等级：三选一，选中即保存
   const [trustLevel, setTrustLevel] = useState<TrustLevel>(getTrustLevel)
   // MCP 服务：外部工具生态接入（连接成功后工具自动并入贾维斯能力清单）
@@ -135,49 +112,10 @@ export default function SettingsPage() {
       .catch((reason: unknown) => setMcpError(reason instanceof Error ? reason.message : String(reason)))
   }
 
-  // 提案状态 → 中文徽章文案 / 徽章配色 class
-  const PROPOSAL_BADGES: Record<string, string> = {
-    pending: '待审批',
-    approved: '✅已上线',
-    rejected: '已放弃',
-    failed: '失败',
-  }
-  const PROPOSAL_BADGE_CLASS: Record<string, string> = {
-    approved: 'trace-success',
-    failed: 'trace-failure',
-    rejected: 'ledger-hint',
-  }
-
-  const loadProposals = () => {
-    setProposalsLoading(true); setProposalsError('')
-    listLearnProposals()
-      .then(setProposals)
-      .catch((reason: unknown) => setProposalsError(reason instanceof Error ? reason.message : String(reason)))
-      .finally(() => setProposalsLoading(false))
-  }
-
   useEffect(() => {
-    listMemories()
-      .then(setMemories)
-      .catch((reason: unknown) => setMemoryError(reason instanceof Error ? reason.message : String(reason)))
-    listTasks().then(setTasks).catch((reason: unknown) => setTaskError(reason instanceof Error ? reason.message : String(reason)))
-    listNotifications(false).then(setNotes)
-    loadProposals()
     loadMcpServers()
     listScenes().then(setScenes).catch((reason: unknown) => setSceneError(reason instanceof Error ? reason.message : String(reason)))
   }, [])
-
-  const deleteOneMemory = async (id: number) => {
-    setDeletingId(id); setMemoryError('')
-    try {
-      await deleteMemory(id)
-      setMemories((items) => items.filter((item) => item.id !== id))
-    } catch (reason) {
-      setMemoryError(reason instanceof Error ? reason.message : String(reason))
-    } finally {
-      setDeletingId(null)
-    }
-  }
   const changeTrustLevel = (level: TrustLevel) => {
     setTrustLevel(level)
     try {
@@ -289,35 +227,7 @@ export default function SettingsPage() {
       setSceneBusyId(null)
     }
   }
-  const toggleTask = async (task: TaskInfo) => {
-    setTaskError('')
-    try {
-      const updated = await updateTask(task.id, { enabled: !task.enabled })
-      setTasks((previous) => previous.map((item) => (item.id === task.id ? updated : item)))
-    } catch (reason) {
-      setTaskError(reason instanceof Error ? reason.message : String(reason))
-    }
-  }
-  const removeTask = async (task: TaskInfo) => {
-    setTaskError('')
-    try {
-      await deleteTask(task.id)
-      setTasks((previous) => previous.filter((item) => item.id !== task.id))
-    } catch (reason) {
-      setTaskError(reason instanceof Error ? reason.message : String(reason))
-    }
-  }
-  const removeNote = async (id: number) => {
-    await deleteNotification(id)
-    setNotes((previous) => previous.filter((item) => item.id !== id))
-  }
-  const clearNotes = async () => {
-    for (const note of notes) await deleteNotification(note.id)
-    setNotes([])
-  }
-
-  return (
-    <main className="settings-page">
+  return (    <main className="settings-page">
       <ParticleField />
       <div className="settings-wrap">
         <header className="settings-header">
@@ -334,163 +244,13 @@ export default function SettingsPage() {
 
         <VoiceSection />
 
-        {/* 定时任务管理（晨间简报在上方专属开关，此处不重复展示） */}
-        <section className="section-card">
-          <HudCorners />
-          <header className="module-head">
-            <div>
-              <p className="module-head__kicker">SCHEDULED TASKS</p>
-              <h2>定时任务</h2>
-            </div>
-            <span className={`led ${tasks.some((task) => task.enabled) ? 'is-ready' : ''}`} aria-hidden="true" />
-          </header>
-          <p className="section-description">到点后自动执行并主动播报的任务；也可以直接对贾维斯说“取消某某任务”。</p>
+        <TasksSection />
 
-          {taskError && <p className="error-note" role="alert">{taskError}</p>}
-          {tasks.length === 0 ? (
-            <p className="empty-copy">暂无定时任务。试着对贾维斯说：“每天晚上9点提醒我喝水”。</p>
-          ) : (
-            <div className="toggle-list">
-              {tasks.map((task) => (
-                <div key={task.id} className="toggle-chip">
-                  <span className="toggle-chip__body">
-                    <span className="toggle-chip__label">{task.title}</span>
-                    <span className="toggle-chip__desc">
-                      {task.kind_label}
-                      {task.kind === 'weekly' && task.weekday ? ` ${WEEKDAY_LABELS[task.weekday]}` : ''}
-                      {` ${String(task.hour).padStart(2, '0')}:${String(task.minute).padStart(2, '0')}`}
-                      {task.next_run_at ? ` · 下次：${formatTime(task.next_run_at)}` : ' · 已停用'}
-                    </span>
-                  </span>
-                  <button
-                    type="button"
-                    className={`toggle-chip ${task.enabled ? 'is-on' : ''}`}
-                    style={{ padding: '4px 10px' }}
-                    onClick={() => void toggleTask(task)}
-                  >
-                    <span className="toggle-chip__state">{task.enabled ? 'ON' : 'OFF'}</span>
-                  </button>
-                  <button type="button" className="outline-button" onClick={() => void removeTask(task)}>删除</button>
-                </div>
-              ))}
-            </div>
-          )}
-        </section>
+        <NotificationsSection />
 
-        {/* 通知中心：贾维斯主动播报过的历史都可回看 */}
-        <section className="section-card">
-          <HudCorners />
-          <header className="module-head">
-            <div>
-              <p className="module-head__kicker">NOTIFICATION CENTER</p>
-              <h2>通知中心</h2>
-            </div>
-            <span className={`led ${notes.length > 0 ? 'is-ready' : ''}`} aria-hidden="true" />
-          </header>
-          <p className="section-description">定时播报、日程提醒、情景关怀与习惯洞察的历史记录。</p>
+        <MemoriesSection />
 
-          {notes.length === 0 ? (
-            <p className="empty-copy">暂无通知。</p>
-          ) : (
-            <>
-              <ul className="memory-list">
-                {notes.map((note) => (
-                  <li className="memory-row" key={note.id}>
-                    <div className="memory-row__copy">
-                      <p>
-                        <strong>[{NOTE_KIND_LABELS[note.kind] ?? note.kind}] {note.title}</strong>
-                        {' '}{note.content}
-                      </p>
-                      <time>{formatTime(note.created_at)}</time>
-                    </div>
-                    <button className="outline-button" onClick={() => void removeNote(note.id)}>删除</button>
-                  </li>
-                ))}
-              </ul>
-              <div className="save-bar">
-                <button className="outline-button" onClick={() => void clearNotes()}>清空全部</button>
-              </div>
-            </>
-          )}
-        </section>
-
-        {/* 长期记忆 */}
-        <section className="section-card">
-          <HudCorners />
-          <header className="module-head">
-            <div>
-              <p className="module-head__kicker">LONG-TERM MEMORY</p>
-              <h2>长期记忆</h2>
-            </div>
-            <span className={`led ${memories.length > 0 ? 'is-ready' : ''}`} aria-hidden="true" />
-          </header>
-          <p className="section-description">Agent 会保留你透露的长期信息，供后续对话引用。</p>
-
-          {memoryError && <p className="error-note" role="alert">{memoryError}</p>}
-          {memories.length === 0 ? (
-            <p className="empty-copy">暂无长期记忆。</p>
-          ) : (
-            <ul className="memory-list">
-              {memories.map((memory) => (
-                <li className="memory-row" key={memory.id}>
-                  <div className="memory-row__copy">
-                    <p>{memory.content}</p>
-                    <time>{formatTime(memory.created_at)}</time>
-                  </div>
-                  <button className="outline-button" disabled={deletingId === memory.id} onClick={() => void deleteOneMemory(memory.id)}>
-                    {deletingId === memory.id ? '删除中…' : '删除'}
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
-        </section>
-
-        {/* 技能工厂：自学习提案的状态总览 */}
-        <section className="section-card">
-          <HudCorners />
-          <header className="module-head">
-            <div>
-              <p className="module-head__kicker">SKILL FACTORY</p>
-              <h2>🛠 技能工厂</h2>
-            </div>
-            <span className={`led ${proposals.length > 0 ? 'is-ready' : ''}`} aria-hidden="true" />
-          </header>
-          <p className="section-description">贾维斯自学技能的提案记录；待审批的技能在聊天里回复「批准 编号」即可上线。</p>
-
-          <div className="save-bar" style={{ justifyContent: 'flex-start' }}>
-            <button className="outline-button" disabled={proposalsLoading} onClick={loadProposals}>
-              {proposalsLoading ? '刷新中…' : '刷新'}
-            </button>
-          </div>
-
-          {proposalsError && <p className="error-note" role="alert">{proposalsError}</p>}
-          {proposalsLoading ? (
-            <p className="loading-state">加载中…</p>
-          ) : proposals.length === 0 ? (
-            <p className="empty-copy">暂无学习提案。试着对贾维斯说：“教我一个新技能”。</p>
-          ) : (
-            <ul className="memory-list">
-              {proposals.map((proposal) => (
-                <li className="memory-row" key={proposal.id}>
-                  <div className="memory-row__copy">
-                    <p>
-                      <strong>{proposal.slug}</strong>{' '}
-                      <span className={PROPOSAL_BADGE_CLASS[proposal.status] ?? ''}>{PROPOSAL_BADGES[proposal.status] ?? proposal.status}</span>
-                    </p>
-                    {proposal.description && <p>{truncateText(proposal.description)}</p>}
-                    {proposal.created_at ? <time>{formatTime(proposal.created_at)}</time> : null}
-                    {proposal.status === 'pending' && (
-                      <small className="ledger-hint" style={{ display: 'block', marginTop: 4 }}>
-                        在聊天里回复 批准 {proposal.id} 上线
-                      </small>
-                    )}
-                  </div>
-                </li>
-              ))}
-            </ul>
-          )}
-        </section>
+        <SkillsSection />
 
         {/* 信任等级：贾维斯的自治程度 */}
         <section className="section-card">
