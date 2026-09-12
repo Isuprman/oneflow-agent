@@ -1,39 +1,18 @@
-# OneFlow 后台调度引擎 — 定时任务到点跑 agent 主动播报 + 日程到期提醒
-# 设计：单一 30s 轮询 job（而非每任务一个 cron job），任务增删无需重挂 job，重启即自愈。
+# OneFlow 后台调度引擎 — 单一 30s 轮询 tick：到期任务跑 agent 主动播报 + 遍历后台职责注册表。
+# 设计：每 30s 一个轮询 job（而非每任务一个 cron job），任务增删无需重挂 job，重启即自愈；
+# 各主动服务（提醒/关怀/洞察/分身/面试/体检…）在 app/jobs/ 各自成模块，加新职责不改 tick。
 from datetime import datetime, timedelta
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from .db import SessionLocal
-from .models import Conversation, Notification, Schedule, ScheduledTask, ToolCallLog, User, UserSetting
+from .jobs import REGISTRY
+from .models import Conversation, Notification, ScheduledTask, User
 
 # 轮询间隔（秒）：决定定时任务/提醒的触发精度
 TICK_SECONDS = 30
-# 日程提醒提前量：start_at 落在 [now, now+窗口] 内即推送提醒
-REMINDER_WINDOW_MINUTES = 5
-# 已过期太久的日程不再补提醒（如服务停机错过窗口）
-REMINDER_LATE_MINUTES = 1
 # 定时任务在用户专属播报会话中执行，标题固定便于复用
 TASK_CONVERSATION_TITLE = "定时播报"
-
-# ---- 习惯学习 ----
-# 每日 21 点后跑一次行为洞察；近 N 天同一工具用满阈值次则主动建议
-HABIT_INSIGHT_HOUR = 21
-HABIT_WINDOW_DAYS = 7
-HABIT_MIN_COUNT = 3
-# 工具 → 建议文案（只洞察值得沉淀为习惯的工具）
-HABIT_SUGGESTIONS = {
-    "get_weather": "您最近经常查天气。需要的话对我说：每天早上8点播报天气，我可以每天主动向您报告。",
-    "add_expense": "您最近经常记账。需要的话对我说：每天晚上9点汇总今日开支，我可以帮您每日盘点。",
-    "schedule_event": "您最近经常安排日程。日程开始前我会自动提醒您，也可以让我每天早间简报今日安排。",
-}
-
-# ---- 情景关怀 ----
-# 每晚 20 点后检查：明天有雨/雪 × 明天有日程 → 前一晚主动提醒
-CARE_HOUR = 20
-CARE_PRECIP_THRESHOLD = 60  # 降水概率阈值
-CARE_BAD_WEATHER = ("雨", "毛毛雨", "阵雨", "雷暴", "雪")
-CARE_DEFAULT_CITY = "上海"
 
 
 def compute_next_run(
@@ -153,7 +132,7 @@ def notify_system_error(db, message: str) -> None:
 
 
 async def tick() -> None:
-    """单次轮询：执行到期定时任务 + 推送临期日程提醒。独立 DB 会话，异常不扩散。"""
+    """单次轮询：执行到期定时任务 + 遍历后台职责注册表。独立 DB 会话，异常不扩散。"""
     db = SessionLocal()
     try:
         now = datetime.now()
@@ -179,230 +158,22 @@ async def tick() -> None:
             db.commit()
             await _execute_task(db, task)
 
-        window_end = now + timedelta(minutes=REMINDER_WINDOW_MINUTES)
-        late_limit = now - timedelta(minutes=REMINDER_LATE_MINUTES)
-        try:
-            events = (
-                db.query(Schedule)
-                .filter(
-                    Schedule.notified == 0,
-                    Schedule.start_at >= late_limit,
-                    Schedule.start_at <= window_end,
-                )
-                .all()
-            )
-            for event in events:
-                db.add(
-                    Notification(
-                        user_id=event.user_id,
-                        title="日程提醒",
-                        content=f"{event.start_at:%H:%M} 您有日程：{event.title}",
-                        kind="reminder",
-                    )
-                )
-                event.notified = 1
-            if events:
-                db.commit()
-        except Exception as e:  # 单块失败不拖垮其他规则，异常当天自报一次
-            db.rollback()
-            notify_system_error(db, f"日程提醒检查失败（{e}）")
-
-        # 数字分身：外出规则由 LLM 判定此刻是否需要动作，是则执行并留回放通知
-        try:
-            from .learn.companion import run_away_rules
-
-            await run_away_rules(db)
-        except Exception as e:
-            db.rollback()
-            notify_system_error(db, f"数字分身检查失败（{e}）")
-
-        # 每晚 20 点后：情景关怀（每人每天一次）；21 点后：习惯洞察
-        if now.hour >= CARE_HOUR:
+        # 各后台职责：单块失败不拖垮其他规则，异常当天自报一次
+        for job in REGISTRY:
+            if job.hour_gate is not None and now.hour < job.hour_gate:
+                continue
             try:
-                run_care_rules(db, now)
+                await job.run(db, now)
             except Exception as e:
                 db.rollback()
-                notify_system_error(db, f"情景关怀检查失败（{e}）")
-        if now.hour >= HABIT_INSIGHT_HOUR:
-            try:
-                run_habit_insights(db, now)
-            except Exception as e:
-                db.rollback()
-                notify_system_error(db, f"习惯洞察失败（{e}）")
-            # 21 点后顺带：习惯 → 技能提案（经验结晶，走既有审批流）
-            try:
-                import asyncio
-
-                from .learn.habit import run_daily_proposals
-
-                asyncio.run(run_daily_proposals(db))
-            except Exception as e:
-                db.rollback()
-                notify_system_error(db, f"习惯提案生成失败（{e}）")
-            # 21 点后顺带：上线技能质量反馈环（差评自动降级 / 好评一次性通知）
-            try:
-                import asyncio
-
-                from .learn.habit import run_skill_quality_check
-
-                asyncio.run(run_skill_quality_check(db))
-            except Exception as e:
-                db.rollback()
-                notify_system_error(db, f"技能质量检查失败（{e}）")
-            # 21 点后顺带：反向面试（每周最多一次，主动补全用户画像盲区）
-            try:
-                await run_interviews(db)
-            except Exception as e:
-                db.rollback()
-                notify_system_error(db, f"反向面试失败（{e}）")
-            # 21 点后顺带：年度体检（每周最多一次，抽样金题 + 直接重放打分 + 通知）
-            try:
-                from .learn.checkup import run_weekly_checkups
-
-                run_weekly_checkups(db)
-            except Exception as e:
-                db.rollback()
-                notify_system_error(db, f"年度体检失败（{e}）")
+                notify_system_error(db, f"{job.label}失败（{e}）")
     finally:
         db.close()
 
 
-def run_care_rules(db, now: datetime) -> None:
-    """情景关怀：明天有雨雪且明天有日程 → 前一晚主动提醒带伞/提前出发。
-
-    纯规则无 LLM 开销；天气查询失败静默跳过，每人每天最多一次。
-    """
-    from .tools.profile import load_profile
-    from .tools.weather import query_weather
-
-    today_key = now.strftime("%Y-%m-%d")
-    tomorrow = now + timedelta(days=1)
-    tomorrow_key = tomorrow.strftime("%Y-%m-%d")
-
-    users = db.query(User).all()
-    for user in users:
-        flag = (
-            db.query(UserSetting)
-            .filter(UserSetting.user_id == user.id, UserSetting.key == "care_last_check")
-            .first()
-        )
-        if flag is not None and flag.value == today_key:
-            continue
-
-        city = load_profile(db, user.id).get("city") or CARE_DEFAULT_CITY
-        try:
-            weather = query_weather(city, tomorrow_key)
-        except Exception:
-            weather = {"success": False}
-        if weather.get("success"):
-            bad = weather.get("weather") in CARE_BAD_WEATHER
-            wet = (weather.get("precip_prob") or 0) >= CARE_PRECIP_THRESHOLD
-            if bad or wet:
-                events = (
-                    db.query(Schedule)
-                    .filter(
-                        Schedule.user_id == user.id,
-                        Schedule.start_at >= datetime(tomorrow.year, tomorrow.month, tomorrow.day),
-                        Schedule.start_at < datetime(tomorrow.year, tomorrow.month, tomorrow.day) + timedelta(days=1),
-                    )
-                    .order_by(Schedule.start_at.asc())
-                    .all()
-                )
-                if events:
-                    first = events[0]
-                    agenda = f"您明天 {first.start_at:%H:%M} 有「{first.title}」" + (
-                        f"等 {len(events)} 个日程" if len(events) > 1 else ""
-                    )
-                    content = (
-                        f"先生，{city}明天预报有{weather.get('weather')}"
-                        f"（降水概率 {weather.get('precip_prob')}%）。{agenda}，建议带伞并提前出发。"
-                    )
-                    db.add(Notification(user_id=user.id, title="明日天气关怀", content=content, kind="care"))
-
-        if flag is None:
-            db.add(UserSetting(user_id=user.id, key="care_last_check", value=today_key))
-        else:
-            flag.value = today_key
-        db.commit()
-
-
-def run_habit_insights(db, now: datetime) -> None:
-    """习惯学习：统计近 N 天工具使用，高频行为主动建议沉淀为定时任务。
-
-    纯统计无 LLM 开销；已建议过的（UserSetting 标记）不重复打扰。
-    """
-    today_key = now.strftime("%Y-%m-%d")
-    window_start = now - timedelta(days=HABIT_WINDOW_DAYS)
-
-    users = db.query(User).all()
-    for user in users:
-        flag = (
-            db.query(UserSetting)
-            .filter(UserSetting.user_id == user.id, UserSetting.key == "habit_last_check")
-            .first()
-        )
-        if flag is not None and flag.value == today_key:
-            continue
-
-        # 该用户近 N 天的工具调用（经会话归属用户）
-        rows = (
-            db.query(ToolCallLog.tool_name)
-            .join(Conversation, Conversation.id == ToolCallLog.conversation_id)
-            .filter(Conversation.user_id == user.id, ToolCallLog.created_at >= window_start)
-            .all()
-        )
-        counts: dict[str, int] = {}
-        for (tool_name,) in rows:
-            counts[tool_name] = counts.get(tool_name, 0) + 1
-
-        for tool_name, count in counts.items():
-            suggestion = HABIT_SUGGESTIONS.get(tool_name)
-            if not suggestion or count < HABIT_MIN_COUNT:
-                continue
-            dedup_key = f"habit_suggested:{tool_name}"
-            already = (
-                db.query(UserSetting)
-                .filter(UserSetting.user_id == user.id, UserSetting.key == dedup_key)
-                .first()
-            )
-            if already is not None:
-                continue
-            db.add(Notification(user_id=user.id, title="习惯洞察", content=suggestion, kind="habit"))
-            db.add(UserSetting(user_id=user.id, key=dedup_key, value=today_key))
-
-        if flag is None:
-            db.add(UserSetting(user_id=user.id, key="habit_last_check", value=today_key))
-        else:
-            flag.value = today_key
-        db.commit()
-
-
-async def run_interviews(db) -> list[str]:
-    """反向面试：对每个用户做每周最多一次的画像补全提问。
-
-    仅 should_interview 通过时才生成+投递；单人异常回滚跳过，不拖垮其他用户。
-    """
-    from .learn.interview import deliver, generate_question, should_interview
-    from .user_cfg import get_llm_map
-
-    summaries: list[str] = []
-    for user in db.query(User).all():
-        try:
-            if not should_interview(db, user.id):
-                continue
-            cfg_map = get_llm_map(db, user.id)
-            if not cfg_map.get("llm.api_key"):
-                continue
-            cfg = {"provider": cfg_map.get("llm.provider"), "model": cfg_map.get("llm.model"),
-                   "api_key": cfg_map.get("llm.api_key"), "base_url": cfg_map.get("llm.base_url")}
-            question = await generate_question(db, user, cfg)
-            if not question:
-                continue
-            deliver(db, user.id, question)
-            summaries.append(f"user{user.id}: {question[:40]}")
-        except Exception:
-            db.rollback()
-    return summaries
+# 兼容导出：历史调用方与测试直接从 app.scheduler 导入这两个规则函数
+from .jobs.care import run_care_rules  # noqa: E402,F401
+from .jobs.habits import run_habit_insights  # noqa: E402,F401
 
 
 def start_scheduler() -> AsyncIOScheduler:
