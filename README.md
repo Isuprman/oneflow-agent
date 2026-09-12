@@ -22,6 +22,24 @@ ddgs + BeautifulSoup（联网）· 云端 Embedding（语义记忆，零本地�
 React 18 + TypeScript + Vite · react-three-fiber（3D 全息核心）· PWA ·
 **Electron（桌面壳）· sherpa-onnx（本地流式语音识别，离线）** · pytest
 
+## 项目结构
+```
+app/                        后端
+├── agent/                  agent loop：engine 主循环 + memory_recall / confirm / subagent / llm / context
+├── jobs/                   后台主动服务注册表：提醒·关怀·洞察·数字分身·面试·体检…（一个职责一个模块）
+├── learn/                  自学习：技能工厂·习惯结晶·情绪感知·反向面试·年度体检
+├── routers/                API 路由（一个域一个文件）  ├── tools/  agent 工具（registry 统一注册）
+├── scheduler.py            30s 轮询 tick：到期任务 + jobs 注册表遍历
+└── models.py / db.py / main.py
+frontend/src/               前端
+├── api/                    每个后端路由一个域文件（共用 http.ts 实例）
+├── hooks/                  聊天页各能力 hook（待命/播报/发送/通知…自包含）
+├── lib/speech/             语音栈：wake 唤醒状态机 / asr+local 双识别通道 / playback 播报管道
+├── pages/settings/         设置页区块组件（每区块自包含，页面只做布局）
+└── components/ pages/ theme/ store/
+```
+> 各目录的落位规则与防拥挤红线详见 [ARCHITECTURE.md](ARCHITECTURE.md)——加新功能前先读它。
+
 ## 快速开始
 
 ```bash
@@ -234,4 +252,5 @@ POST /api/market/skills/{id}/install（安装 = 既有门禁 + 沙箱重验后�
 - ✅ 技能市场：浏览 / 安装（门禁+沙箱重验）/ 导出已上线技能 · **年度体检**（金题集每周重放打分 + 健康通知）
 - ✅ 数据主权：全部个人数据一键导出（单份 JSON）· 确认式彻底清除（外键层级真删 + 行数收据）
 - ✅ 3D 全息前端：全息核心随播报律动 · 深空 HUD · 打字机/动效 · 功能全保留
+- ✅ 结构治理：设置页/聊天页/语音栈/API 层/scheduler/engine 全部模块化拆分 · 258 测试全绿 · 落位规则见 ARCHITECTURE.md
 - ⏭ 下一步可选：拍照/截图记账（多模态，需视觉模型）· 本地唤醒词模型（keyword spotter）· 真 Web Push · RAG · Telegram 入口 · 长程任务规划（动态拆解与重排）
