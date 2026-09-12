@@ -75,7 +75,6 @@ function CoreMesh({
   useEffect(() => {
     if (pulse == null || pulse <= 0 || reducedRef.current) return
     spawnShock()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pulse])
 
   // 轨道粒子：沿 3 条倾斜环分布（数量克制，≤300）

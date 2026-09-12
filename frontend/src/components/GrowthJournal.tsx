@@ -6,22 +6,9 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { MotionConfig, motion, useSpring, useTransform } from 'framer-motion'
-import axios from 'axios'
+import { getJournal, type JournalData } from '../api/journal'
 import HudCorners from './HudCorners'
 import ParticleField from './ParticleField'
-
-interface Milestone {
-  date: string | null
-  title: string
-}
-
-interface JournalData {
-  first_skill: Milestone | null
-  learned_count: number
-  rejected_count: number
-  milestones: Milestone[]
-  total_tool_calls: number
-}
 
 function formatDate(iso: string | null): string {
   if (!iso) return '—'
@@ -85,13 +72,9 @@ export default function GrowthJournal() {
 
   useEffect(() => {
     let cancelled = false
-    const token = localStorage.getItem('oneflow_token')
-    axios
-      .get<JournalData>('/api/journal', {
-        headers: token ? { Authorization: `Bearer ${token}` } : {},
-      })
-      .then((resp) => {
-        if (!cancelled) setData(resp.data)
+    getJournal()
+      .then((payload) => {
+        if (!cancelled) setData(payload)
       })
       .catch(() => {
         if (!cancelled) setErrorText('成长档案加载失败，请重试')

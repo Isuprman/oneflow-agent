@@ -22,7 +22,7 @@ export async function listScenes(): Promise<SceneInfo[]> {
     const resp = await http.get('/scenes')
     return resp.data as SceneInfo[]
   } catch (error) {
-    throw new Error(getErrorMessage(error))
+    throw new Error(getErrorMessage(error), { cause: error })
   }
 }
 
@@ -31,7 +31,7 @@ export async function createScene(name: string, steps: string[]): Promise<SceneI
     const resp = await http.post('/scenes', { name, steps })
     return resp.data as SceneInfo
   } catch (error) {
-    throw new Error(getErrorMessage(error))
+    throw new Error(getErrorMessage(error), { cause: error })
   }
 }
 
@@ -40,7 +40,7 @@ export async function toggleScene(id: number, enabled: boolean): Promise<SceneIn
     const resp = await http.put(`/scenes/${id}`, { enabled })
     return resp.data as SceneInfo
   } catch (error) {
-    throw new Error(getErrorMessage(error))
+    throw new Error(getErrorMessage(error), { cause: error })
   }
 }
 
@@ -48,7 +48,7 @@ export async function deleteScene(id: number): Promise<void> {
   try {
     await http.delete(`/scenes/${id}`)
   } catch (error) {
-    throw new Error(getErrorMessage(error))
+    throw new Error(getErrorMessage(error), { cause: error })
   }
 }
 
@@ -57,6 +57,6 @@ export async function runScene(id: number): Promise<SceneRunResult[]> {
     const resp = await http.post(`/scenes/${id}/run`)
     return resp.data as SceneRunResult[]
   } catch (error) {
-    throw new Error(getErrorMessage(error))
+    throw new Error(getErrorMessage(error), { cause: error })
   }
 }
