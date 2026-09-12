@@ -26,7 +26,7 @@ def test_subagent_executes_tool_and_returns_text(db_session, monkeypatch):
         LLMResult(text="已记 50 元餐饮"),
     ]
 
-    async def fake_chat(messages, tools, cfg=None, on_delta=None):
+    async def fake_chat(messages, tools, cfg=None, on_delta=None, **kwargs):
         return replies.pop(0)
 
     monkeypatch.setattr("app.agent.llm.chat", fake_chat)
@@ -57,7 +57,7 @@ def test_subagent_step_breaker(db_session, monkeypatch):
     user = _new_user(db, "sub_breaker")
     monkeypatch.setattr(settings, "max_steps", 3)
 
-    async def always_tool(messages, tools, cfg=None, on_delta=None):
+    async def always_tool(messages, tools, cfg=None, on_delta=None, **kwargs):
         return LLMResult(tool_call=ToolCall("add_expense", {"amount": 1, "category": "餐饮"}))
 
     monkeypatch.setattr("app.agent.llm.chat", always_tool)

@@ -17,7 +17,7 @@ def patch_llm_for_stream():
     mp = pytest.MonkeyPatch()
     mp.setattr(settings, "llm_api_key", "x")
 
-    async def fake_chat(messages, tools, cfg=None, on_delta=None):
+    async def fake_chat(messages, tools, cfg=None, on_delta=None, **kwargs):
         # 模拟真流式：正文按 8 字分块经 on_delta 实时推出
         if on_delta is not None:
             for i in range(0, len(FAKE_REPLY), 8):
@@ -98,7 +98,7 @@ def test_stream_tool_step_events(client, monkeypatch):
         LLMResult(text="结果是 20"),
     ]
 
-    async def fake_chat(messages, tools, cfg=None, on_delta=None):
+    async def fake_chat(messages, tools, cfg=None, on_delta=None, **kwargs):
         return replies.pop(0)
 
     monkeypatch.setattr(llm_mod, "chat", fake_chat)
@@ -120,7 +120,7 @@ def test_stream_tool_step_events(client, monkeypatch):
 def test_stream_error_event_not_persisted(client, monkeypatch):
     """LLM 调用失败：推 error 事件，错误文本不落库进历史。"""
 
-    async def err_chat(messages, tools, cfg=None, on_delta=None):
+    async def err_chat(messages, tools, cfg=None, on_delta=None, **kwargs):
         return LLMResult(text="LLM 调用出错: boom", error=True)
 
     monkeypatch.setattr(llm_mod, "chat", err_chat)

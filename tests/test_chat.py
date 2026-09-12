@@ -12,7 +12,7 @@ def patch_llm_for_chat():
     mp = pytest.MonkeyPatch()
     mp.setattr(settings, "llm_api_key", "x")
 
-    async def fake_chat(messages, tools, cfg=None, on_delta=None):
+    async def fake_chat(messages, tools, cfg=None, on_delta=None, **kwargs):
         return LLMResult(text="你好")
 
     mp.setattr(llm_mod, "chat", fake_chat)

@@ -49,7 +49,7 @@ def test_engine_injects_profile(db_session, monkeypatch):
 
     captured = {}
 
-    async def fake_chat(messages, tools, cfg=None, on_delta=None):
+    async def fake_chat(messages, tools, cfg=None, on_delta=None, **kwargs):
         captured["system"] = messages[0]["content"]
         return LLMResult(text="好的")
 

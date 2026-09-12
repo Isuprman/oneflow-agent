@@ -210,7 +210,7 @@ async def run_agent(
             if (stream and on_event is not None)
             else None
         )
-        res = await llm_mod.chat(payload, tools, cfg, on_delta=on_delta)
+        res = await llm_mod.chat(payload, tools, cfg, on_delta=on_delta, user_id=user.id)
 
         # 调用失败：推送错误事件并直接返回，错误文本不落库（避免污染后续历史）
         if res.error:

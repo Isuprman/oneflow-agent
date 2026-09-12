@@ -100,7 +100,7 @@ def test_delegate_to_custom_agent(db_session, monkeypatch):
 
     counter = {"n": 0}
 
-    async def fake_chat(messages, tools, cfg=None, on_delta=None):
+    async def fake_chat(messages, tools, cfg=None, on_delta=None, **kwargs):
         counter["n"] += 1
         if counter["n"] == 1:  # 总控：委派自定义 agent
             return LLMResult(tool_call=ToolCall("delegate", {"agent_name": "coach", "instruction": "算 2+2"}))
