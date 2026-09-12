@@ -14,6 +14,8 @@
 **技能市场**（他会的装给你，你学的可导出分享）、**年度体检**（每周重放历史调用自我打分）、
 **记忆认知**（矛盾自动消解、久未用的自然遗忘）、**数据主权**（全部个人数据一键导出/彻底清除）。
 
+> 加新功能前先读 [ARCHITECTURE.md](ARCHITECTURE.md) 的落位规则——把代码放对地方，别再堆成大文件。
+
 ## 技术栈
 Python 3.12 · FastAPI · SQLite + SQLAlchemy · LiteLLM（多厂商 LLM）· APScheduler（后台调度）·
 ddgs + BeautifulSoup（联网）· 云端 Embedding（语义记忆，零本地负担）·
