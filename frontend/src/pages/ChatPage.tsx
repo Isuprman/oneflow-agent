@@ -1,13 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { MotionConfig, AnimatePresence, motion, type Variants } from 'framer-motion'
-import { listConversations, createConversation, getMessages } from '../api/conversations'
-import { streamChat, type StreamStep } from '../api/chat'
+import { listConversations } from '../api/conversations'
 import { listNotifications, markNotificationRead } from '../api/notifications'
+import { streamChat, type StreamStep } from '../api/chat'
 import { getIdleHint } from '../api/idleHint'
 import { tts } from '../api/tts'
 import LearnProposalCard from '../components/LearnProposalCard'
-import type { Conversation, Message, ToolStep } from '../api/types'
 import AiCore, { type ReactiveLevel } from '../components/AiCore'
 import ParticleField from '../components/ParticleField'
 import SceneFX from '../components/SceneFX'
@@ -26,11 +25,11 @@ import { startLocalStandby } from '../lib/speech/local'
 import { pickQuip, resetQuipProgress } from '../lib/quips'
 import { getLevel, startMicAnalyser } from '../lib/audioReactive'
 import { toPlainText } from '../lib/plain'
+import { useConversations } from '../hooks/useConversations'
+import { useHud } from '../hooks/useHud'
 
-interface ChatMessage { id: string; role: 'user' | 'assistant'; content: string; trace?: ToolStep[]; isStreaming?: boolean }
 // 致命识别错误码：命中则不再假装监听，停掉待命并明确提示；其余（no-speech/aborted 等）由重挂自愈
 const FATAL_SR_ERRORS = ['not-allowed', 'service-not-allowed', 'network', 'bad-grammar']
-function isRenderable(message: Message): message is Message & { role: 'user' | 'assistant'; content: string } { return (message.role === 'user' || message.role === 'assistant') && message.content !== null }
 
 /** 全息 glitch-in 入场：轻微位移 + 透明度 + blur 收敛；用户/AI 分别。 */
 const msgVariants: Record<'user' | 'assistant', Variants> = {
@@ -54,27 +53,17 @@ export default function ChatPage() {
   const navigate = useNavigate()
   const user = useAuthStore((state) => state.user)
   const logout = useAuthStore((state) => state.logout)
-  const [conversations, setConversations] = useState<Conversation[]>([])
-  const [activeId, setActiveId] = useState<number | null>(null)
-  const [messages, setMessages] = useState<ChatMessage[]>([])
+  const hud = useHud()
+  const { setError } = hud
+  const convo = useConversations(setError, () => setInput(''))
+  const { conversations, activeId, setActiveId, setConversations, messages, loadingMessages, expandedTraces, setExpandedTraces, loadMessages, newChat } = convo
   const [input, setInput] = useState('')
   const [sending, setSending] = useState(false)
-  const [loadingMessages, setLoadingMessages] = useState(false)
-  const [error, setError] = useState('')
-  const [expandedTraces, setExpandedTraces] = useState<Set<string>>(new Set())
   const [standbyOn, setStandbyOn] = useState(false)
   const [wakeStatus, setWakeStatus] = useState('')
   const [standbyLive, setStandbyLive] = useState('')
   // 右上角 hud-transcript 展示用的转写（与识别主流程解耦，仅控制展示态）
   const [shownTranscript, setShownTranscript] = useState('')
-  // 发消息错误 → 单个右上 Toast
-  const [toast, setToast] = useState<string | null>(null)
-  // 右上角「OPERATOR 刚说的话」：只在此显示一次，~2s 自动消失（时间线不重复显示用户消息）
-  const [echo, setEcho] = useState<string | null>(null)
-  const echoTimerRef = useRef<number | null>(null)
-  // 右上角「JARVIS 回复」：完成后 ~3s 自动消失（时间线仍保留回复记录）
-  const [jarvisEcho, setJarvisEcho] = useState<string | null>(null)
-  const jarvisEchoTimerRef = useRef<number | null>(null)
   // 真流式：累积 delta 增量，实时刷新 JARVIS 回显；出错标记防播报错误文本
   const liveTextRef = useRef('')
   const hadErrorRef = useRef(false)
@@ -113,9 +102,7 @@ export default function ChatPage() {
   const standbyErrorRef = useRef<string>('')
   // 播报安全网定时器：音频 ended 事件异常不触发时兜底恢复监听
   const voiceSafetyRef = useRef<number | null>(null)
-  const voiceTimerRef = useRef<number | null>(null)
   const transcriptTimerRef = useRef<number | null>(null)
-  const toastTimerRef = useRef<number | null>(null)
   // 声音驱动链路（rAF 每帧写 ref，避免每帧 setState）
   const voiceReactiveOnRef = useRef(false)
   // 播报律动：voiceLive 期间向 AiCore 写入模拟音频幅度（音频驱动开关时让位给真实麦克风）
@@ -125,31 +112,6 @@ export default function ChatPage() {
   const analyserCleanupRef = useRef<(() => void) | null>(null)
   const voiceRafRef = useRef<number | null>(null)
   const reactiveLevelRef = useRef<ReactiveLevel>({ vol: 0, low: 0 })
-
-  const loadMessages = useCallback(async (id: number) => {
-    setLoadingMessages(true); setError('')
-    try { const loaded = await getMessages(id); setMessages(loaded.filter(isRenderable).filter((message) => message.role !== 'user' && message.role !== 'assistant').map((message) => ({ id: `history-${message.id}`, role: message.role, content: message.content }))); setExpandedTraces(new Set()) }
-    catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); setMessages([]) }
-    finally { setLoadingMessages(false) }
-  }, [])
-
-  useEffect(() => { listConversations().then((list) => { setConversations(list); if (list[0]) { setActiveId(list[0].id); void loadMessages(list[0].id) } }).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : String(reason))) }, [loadMessages])
-
-  const clearToast = useCallback(() => {
-    if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current)
-    toastTimerRef.current = null
-    setToast(null)
-  }, [])
-
-  /** 弹一个 ~2.5s 自动消失的顶部居中 Toast（重复错误会重置计时器）。 */
-  const showToast = useCallback((message: string) => {
-    if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current)
-    setToast(message)
-    toastTimerRef.current = window.setTimeout(() => {
-      toastTimerRef.current = null
-      setToast(null)
-    }, 2500)
-  }, [])
 
   /** 语音播报一段文本：分句流水线（首句合成完即开播，合成与播放交错）+ 暂停待命防回声。
    *  followUp=true 时（仅对话回复）播完进免唤醒跟随窗口；显示与声音对齐：播报期间文字不淡出。 */
@@ -162,7 +124,7 @@ export default function ChatPage() {
       standbyActionsRef.current.pause()
     }
     // 播报期间回显文字保持展示，播完才淡出（消除“字先消失声音才来”的错位）
-    if (jarvisEchoTimerRef.current) { window.clearTimeout(jarvisEchoTimerRef.current); jarvisEchoTimerRef.current = null }
+    hud.holdJarvisEcho()
     // 全息核心随播报律动（音频驱动开启时不覆盖真实麦克风数据）
     if (!voiceReactiveOnRef.current && speakAnimRef.current === null) {
       const startedAt = performance.now()
@@ -192,8 +154,7 @@ export default function ChatPage() {
         if (!standbyOnRef.current) standbyActionsRef.current.resume()
         if (followUp && standbyOnRef.current) enterFollowUpWindow()
       }
-      if (jarvisEchoTimerRef.current) window.clearTimeout(jarvisEchoTimerRef.current)
-      jarvisEchoTimerRef.current = window.setTimeout(() => setJarvisEcho(null), 3500)
+      hud.fadeJarvisEcho(3500)
     }
     // 分句预取流水线：合成器持续预取后续句子，与播放重叠——消除句间空白。
     // 单句合成失败标记 failed，由播放循环回退浏览器语音读该句；被打断则整链作废。
@@ -250,20 +211,18 @@ export default function ChatPage() {
       voiceSafetyRef.current = null
       finish()
     }, Math.min(8000 + plain.length * 320, 120000))
-  }, [])
+  }, [hud])
 
   const doSend = useCallback((rawText: string) => {
     const text = rawText.trim()
     if (!text) return
     // 忙时不再静默丢弃：明确告知用户上一件事还在处理
-    if (sending) { showToast('正在处理上一件事，请稍候'); return }
-    clearToast()
+    if (sending) { hud.showToast('正在处理上一件事，请稍候'); return }
+    hud.clearToast()
     lastInteractionRef.current = Date.now()
     setInput(''); setSending(true); sendingRef.current = true; setError('')
     // 右上角「OPERATOR + 内容」只显示一次，~2s 自动消失；不再进左侧时间线
-    setEcho(text)
-    if (echoTimerRef.current) window.clearTimeout(echoTimerRef.current)
-    echoTimerRef.current = window.setTimeout(() => setEcho(null), 2000)
+    hud.showEcho(text)
     setCorePulse((value) => value + 1)
     liveTextRef.current = ''
     hadErrorRef.current = false
@@ -273,8 +232,8 @@ export default function ChatPage() {
       // 真流式打字机：delta 增量实时进右上角 JARVIS 回显
       if (hadErrorRef.current) return
       liveTextRef.current += piece
-      setJarvisEcho(liveTextRef.current)
-      if (jarvisEchoTimerRef.current) { window.clearTimeout(jarvisEchoTimerRef.current); jarvisEchoTimerRef.current = null }
+      hud.showJarvisEcho(liveTextRef.current)
+      hud.holdJarvisEcho()
     }, (response) => {
       setLiveTool('')
       if (activeId === null) { setActiveId(response.conversation_id); listConversations().then(setConversations).catch(() => {}) }
@@ -287,16 +246,16 @@ export default function ChatPage() {
         return
       }
       // 右上角 JARVIS 回复回显：语音开启时文字保持到播完才淡出（显示与声音对齐）
-      setJarvisEcho(toPlainText(response.reply))
-      if (jarvisEchoTimerRef.current) window.clearTimeout(jarvisEchoTimerRef.current)
-      if (!voiceOnRef.current) jarvisEchoTimerRef.current = window.setTimeout(() => setJarvisEcho(null), 3500)
+      hud.showJarvisEcho(toPlainText(response.reply))
+      hud.holdJarvisEcho()
+      if (!voiceOnRef.current) hud.fadeJarvisEcho(3500)
       speakReply(toPlainText(response.reply), true)
     }, (reason) => {
       // 发送失败/服务端 error 事件：顶部 Toast；标记出错防播报错误文本
       hadErrorRef.current = true
       setLiveTool('')
-      setJarvisEcho(null)
-      showToast(reason.message)
+      hud.showJarvisEcho(null)
+      hud.showToast(reason.message)
     }, (step: StreamStep) => {
       // 工具步骤实时上遥测：calling 显示工具名，done 回落思考态
       setLiveTool(step.status === 'calling' ? step.tool : '')
@@ -304,7 +263,7 @@ export default function ChatPage() {
       // 高危操作待确认：弹确认条，点按钮或语音说“确认/取消”均可
       setPendingConfirm(pending)
     }).finally(() => { setSending(false); sendingRef.current = false })
-  }, [activeId, sending, clearToast, showToast, speakReply])
+  }, [activeId, sending, setActiveId, setConversations, hud, setError, speakReply])
 
   const handleWake = useCallback((command: string) => {
     lastInteractionRef.current = Date.now()
@@ -340,10 +299,10 @@ export default function ChatPage() {
         night: hour >= 23 || hour < 5,
         afterSpeak: Date.now() - lastSpeakEndRef.current < 60000,
       })
-      setJarvisEcho(quip)
+      hud.showJarvisEcho(quip)
       speakReply(quip)
     }, 3500)
-  }, [doSend, speakReply])
+  }, [doSend, speakReply, hud])
   const handleWakeRef = useRef(handleWake); handleWakeRef.current = handleWake
   // 会话模式事件：进入 → UI 状态；退出（用户说退下/闲置超时）→ 告别播报
   const handleConvo = useCallback((event: ConvoEvent) => {
@@ -351,9 +310,9 @@ export default function ChatPage() {
     setConvoOn(false)
     setWakeStatus('')
     const line = event.reason === 'timeout' ? '那我先退下了，先生。' : '好的，先生，我先退下了。'
-    setJarvisEcho(line)
+    hud.showJarvisEcho(line)
     speakReply(line)
-  }, [speakReply])
+  }, [speakReply, hud])
   const handleConvoRef = useRef(handleConvo); handleConvoRef.current = handleConvo
   const stopStandbyLocal = useCallback((opts?: { keepConvo?: boolean }) => { standbyOnRef.current = false; if (standbyTimerRef.current) window.clearTimeout(standbyTimerRef.current); standbyStopRef.current?.(); standbyStopRef.current = null; resetWakeState(opts?.keepConvo ?? false); if (opts?.keepConvo) bumpConvoIdle(); setStandbyOn(false); setStandbyLive(''); setWakeStatus('') }, [])
   // 致命识别错误：不再假装监听，停掉待命并明确提示；瞬态错误（no-speech/aborted 等）由重挂自愈
@@ -365,7 +324,7 @@ export default function ChatPage() {
     setError(code === 'network'
       ? '语音识别服务不可达（Chrome 识别需连 Google 服务）：待命已关闭，可用输入框或检查网络后重新开启'
       : '麦克风不可用（权限被拒）：请在浏览器设置允许麦克风后重新开启待命')
-  }, [stopStandbyLocal])
+  }, [stopStandbyLocal, setError])
   const handleStandbyErrorRef = useRef(handleStandbyError); handleStandbyErrorRef.current = handleStandbyError
   const armStandbyRef = useRef<() => void>(() => {})
   const armStandby = useCallback(() => {
@@ -395,7 +354,7 @@ export default function ChatPage() {
       )
     }
     standbyOnRef.current = true; setStandbyOn(true); setStandbyLive(''); setWakeStatus(useLocal ? '正在监听…（本地识别）' : '正在监听…')
-  }, [])
+  }, [setError])
   armStandbyRef.current = armStandby
   standbyActionsRef.current = { pause: () => stopStandbyLocal({ keepConvo: true }), resume: armStandby }
 
@@ -431,7 +390,7 @@ export default function ChatPage() {
         voiceReactiveOnRef.current = false
         setError('无法启用声音驱动（麦克风无权限）')
       })
-  }, [micAvailable])
+  }, [micAvailable, setError])
   const startVoiceReactiveRef = useRef(startVoiceReactive); startVoiceReactiveRef.current = startVoiceReactive
 
   useEffect(() => {
@@ -443,8 +402,8 @@ export default function ChatPage() {
     if (bridge && !bridge.asrAvailable()) setError('本地语音模型未下载：在 desktop 目录执行 npm run models（当前已回退浏览器识别）')
     if (prefs.standby) standbyTimerRef.current = window.setTimeout(armStandby, 400)
     if (prefs.audioDrive) startVoiceReactiveRef.current()
-    return () => { resumeStandbyRef.current = false; stopStandbyLocal(); stopVoiceReactive(); if (speakAnimRef.current !== null) window.cancelAnimationFrame(speakAnimRef.current); if (quipTimerRef.current !== null) window.clearTimeout(quipTimerRef.current); if (voiceTimerRef.current) window.clearTimeout(voiceTimerRef.current); if (voiceSafetyRef.current) window.clearTimeout(voiceSafetyRef.current); if (transcriptTimerRef.current !== null) window.clearTimeout(transcriptTimerRef.current); if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current); if (echoTimerRef.current !== null) window.clearTimeout(echoTimerRef.current); if (jarvisEchoTimerRef.current !== null) window.clearTimeout(jarvisEchoTimerRef.current); window.removeEventListener('pointerdown', unlock); window.removeEventListener('keydown', unlock) }
-  }, [armStandby, stopStandbyLocal, stopVoiceReactive])
+    return () => { resumeStandbyRef.current = false; stopStandbyLocal(); stopVoiceReactive(); if (speakAnimRef.current !== null) window.cancelAnimationFrame(speakAnimRef.current); if (quipTimerRef.current !== null) window.clearTimeout(quipTimerRef.current); if (voiceSafetyRef.current) window.clearTimeout(voiceSafetyRef.current); if (transcriptTimerRef.current !== null) window.clearTimeout(transcriptTimerRef.current); window.removeEventListener('pointerdown', unlock); window.removeEventListener('keydown', unlock) }
+  }, [armStandby, stopStandbyLocal, stopVoiceReactive, setError])
 
   // 主动通知轮询：定时任务播报/日程提醒 → 右上角展示 + 语音播报 + 标记已读
   useEffect(() => {
@@ -474,8 +433,8 @@ export default function ChatPage() {
       const display = list.length === 1
         ? `【${latest.title}】${toPlainText(latest.content)}`
         : `【${latest.title}】等 ${list.length} 条新通知`
-      setJarvisEcho(display)
-      if (jarvisEchoTimerRef.current) window.clearTimeout(jarvisEchoTimerRef.current)
+      hud.showJarvisEcho(display)
+      hud.holdJarvisEcho()
       if (speakable.length > 0) {
         const speakText = speakable
           .map((note) => `${note.title}：${toPlainText(note.content)}`)
@@ -485,14 +444,14 @@ export default function ChatPage() {
         // 文字由 speakReply 接管（播完才淡出）
         speakReply(speakText, true)
       } else {
-        jarvisEchoTimerRef.current = window.setTimeout(() => setJarvisEcho(null), 6000)
+        hud.fadeJarvisEcho(6000)
       }
       for (const note of list) void markNotificationRead(note.id)
     }
     void poll()
     const timer = window.setInterval(() => void poll(), 15000)
     return () => { cancelled = true; window.clearInterval(timer) }
-  }, [speakReply])
+  }, [speakReply, hud])
 
   // 闲置轻推：长时间无交互时贾维斯主动说一句（每会话最多 2 次，宁缺毋滥）
   useEffect(() => {
@@ -506,15 +465,13 @@ export default function ChatPage() {
       if (!hint || !hint.text || chatterCountRef.current >= 2) return
       chatterCountRef.current += 1
       lastInteractionRef.current = Date.now()
-      setJarvisEcho(hint.text)
-      if (jarvisEchoTimerRef.current) window.clearTimeout(jarvisEchoTimerRef.current)
-      if (!voiceOnRef.current) jarvisEchoTimerRef.current = window.setTimeout(() => setJarvisEcho(null), 6000)
+      hud.showJarvisEcho(hint.text)
+      hud.holdJarvisEcho()
+      if (!voiceOnRef.current) hud.fadeJarvisEcho(6000)
       speakReply(hint.text, true)
     }, 60000)
     return () => window.clearInterval(timer)
-  }, [speakReply])
-
-  const newChat = async () => { setError(''); try { const conversation = await createConversation(); setConversations((previous) => [conversation, ...previous.filter((item) => item.id !== conversation.id)]); setActiveId(conversation.id); setMessages([]); setInput(''); setExpandedTraces(new Set()) } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)) } }
+  }, [speakReply, hud])
 
   const hasConversation = messages.length > 0
   const coreState = sending ? 'thinking' : voiceLive ? 'speaking' : standbyOn ? 'standby' : undefined
@@ -548,7 +505,7 @@ export default function ChatPage() {
         <ParticleField />
         <SceneFX />
         <AnimatePresence>
-          {echo && (
+          {hud.echo && (
             <motion.div
               className="hud-echo"
               initial={{ opacity: 0, y: -6 }}
@@ -558,12 +515,12 @@ export default function ChatPage() {
               aria-live="polite"
             >
               <span className="holo-card__role">OPERATOR</span>
-              <span className="holo-card__copy">{echo}</span>
+              <span className="holo-card__copy">{hud.echo}</span>
             </motion.div>
           )}
         </AnimatePresence>
         <AnimatePresence>
-          {jarvisEcho && (
+          {hud.jarvisEcho && (
             <motion.div
               className="hud-jarvis"
               initial={{ opacity: 0, y: -6 }}
@@ -573,12 +530,12 @@ export default function ChatPage() {
               aria-live="polite"
             >
               <span className="holo-card__role">JARVIS</span>
-              <span className="holo-card__copy">{jarvisEcho}</span>
+              <span className="holo-card__copy">{hud.jarvisEcho}</span>
             </motion.div>
           )}
         </AnimatePresence>
         <AnimatePresence>
-          {toast && (
+          {hud.toast && (
             <div className="hud-toast" role="alert">
               <motion.div
                 className="hud-toast__inner"
@@ -588,7 +545,7 @@ export default function ChatPage() {
                 transition={{ duration: 0.22, ease: 'easeOut' }}
               >
                 <span className="hud-toast__icon">⚠</span>
-                <span className="hud-toast__msg">{toast}</span>
+                <span className="hud-toast__msg">{hud.toast}</span>
               </motion.div>
             </div>
           )}
@@ -633,7 +590,7 @@ export default function ChatPage() {
             </motion.div>
           </div>
 
-          {error && <p className="feedback" role="alert">{error}</p>}
+          {hud.error && <p className="feedback" role="alert">{hud.error}</p>}
 
           {loadingMessages ? (
             <div className="stage-center">
