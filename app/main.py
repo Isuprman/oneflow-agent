@@ -67,6 +67,9 @@ def _migrate_user_memories_cognition() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
+    # 安全告警：默认 JWT 密钥意味着任何人可伪造登录令牌（不拒启，避免桌面端重启掉登录）
+    if settings.jwt_secret in ("", "change-me", "please-change-me"):
+        print("[security] ⚠️  JWT_SECRET 仍为默认值，令牌可被伪造。请在 .env 设置随机密钥（参考 .env.example）")
     _migrate_messages_reasoning()
     _migrate_schedules_notified()
     _migrate_user_memories_embedding()
