@@ -1,7 +1,7 @@
 // 自学习提案卡片 — 解析助手消息里的 [LEARN_PROPOSAL] 标记，提供批准/拒绝操作与历史状态回显
 // 历史提案（跨会话）按持久化的 status 渲染终态文案，不再出现空白块
 import { useState } from 'react'
-import { approveLearnProposal, rejectLearnProposal } from '../api/client'
+import { approveLearnProposal, rejectLearnProposal } from '../api/learn'
 
 interface ProposalInfo {
   id: number
