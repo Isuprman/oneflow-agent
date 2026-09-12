@@ -16,7 +16,7 @@ export function useConversations(onError: (message: string) => void, onConversat
 
   const loadMessages = useCallback(async (id: number) => {
     setLoadingMessages(true); onError('')
-    try { const loaded = await getMessages(id); setMessages(loaded.filter(isRenderable).filter((message) => message.role !== 'user' && message.role !== 'assistant').map((message) => ({ id: `history-${message.id}`, role: message.role, content: message.content }))); setExpandedTraces(new Set()) }
+    try { const loaded = await getMessages(id); setMessages(loaded.filter(isRenderable).map((message) => ({ id: `history-${message.id}`, role: message.role, content: message.content }))); setExpandedTraces(new Set()) }
     catch (reason) { onError(reason instanceof Error ? reason.message : String(reason)); setMessages([]) }
     finally { setLoadingMessages(false) }
   }, [onError])
