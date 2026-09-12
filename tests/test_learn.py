@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from app.config import settings
 from app.learn import gate, service
 
 
@@ -44,6 +45,17 @@ def test_echo_empty(candidate):
 def _force_subprocess_sandbox(monkeypatch):
     """测试不依赖 Docker 状态：统一走子进程沙箱。"""
     monkeypatch.setenv("LEARN_SANDBOX", "subprocess")
+
+
+@pytest.fixture(autouse=True)
+def _global_llm_key_fallback(monkeypatch):
+    """直连 acquire 用例的前提：存在全局兜底 key（llm_configured 语义 = 用户或全局任一非空）。
+
+    用 monkeypatch 而非模块级赋值：用例后自动还原，避免在 pytest 收集阶段
+    污染其他测试文件（曾致 test_agent_loop / test_companion 全套跑必败）。
+    """
+    if not settings.llm_api_key:
+        monkeypatch.setattr(settings, "llm_api_key", "test-global-fallback")
 
 
 def _fake_builder(tool=GOOD_TOOL, tests=GOOD_TESTS):
