@@ -107,3 +107,14 @@ async def run_subagent(db, user, agent_name: str, instruction: str, cfg) -> tupl
             }
         )
         # 工具执行失败也继续循环，靠步数上限兜底
+
+
+async def execute_delegate(db, user, agent_name, instruction, cfg) -> dict:
+    """执行 delegate 工具调用：未知 agent 返回失败 dict；子运行异常包装为失败结果。"""
+    if resolve_agent(db, user.id, agent_name) is None:
+        return {"success": False, "error": f"未知子智能体: {agent_name}，可先用 list_custom_agents 查看"}
+    try:
+        sub_text, sub_steps = await run_subagent(db, user, agent_name, instruction, cfg)
+        return {"success": True, "agent": agent_name, "text": sub_text, "steps": sub_steps}
+    except Exception as e:
+        return {"success": False, "error": f"子智能体执行失败: {e}"}
