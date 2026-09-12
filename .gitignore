@@ -19,3 +19,6 @@ frontend/src.bak-*/
 .idea/
 .vscode/
 *.log
+
+# ---- AI 会话工作目录 ----
+.zcode/

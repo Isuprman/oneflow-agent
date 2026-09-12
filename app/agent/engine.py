@@ -264,7 +264,6 @@ async def run_agent(
                 {"type": "tool_result", "tool": tc.name, "success": success, "result": result},
             )
 
-            fallback = tc.name
             tool_call_id = f"call_{call_id}"
             call_id += 1
 
