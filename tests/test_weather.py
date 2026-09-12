@@ -60,10 +60,16 @@ def test_weather_default_date(monkeypatch):
 
     fake = FakeClient(GEO_PAYLOAD, FORECAST_PAYLOAD)
     monkeypatch.setattr("app.tools.weather.httpx.Client", lambda timeout: fake)
+    # 默认「今天」随真实时钟漂移，会落进 mock 预报范围（固定 2026-08）之外；
+    # 固定 now 使默认日期断言确定
+    monkeypatch.setattr(
+        "app.tools.weather.datetime",
+        type("FakeDatetime", (), {"now": classmethod(lambda cls: datetime(2026, 8, 20))}),
+    )
 
     result = get_weather({"city": "beijing"}, None, None)
     assert result["success"] is True
-    assert result["date"] == datetime.now().strftime("%Y-%m-%d")
+    assert result["date"] == "2026-08-20"
 
 
 def test_weather_city_not_found(monkeypatch):

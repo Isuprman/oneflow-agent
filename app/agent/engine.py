@@ -1,57 +1,19 @@
-# OneFlow Agent 循环（核心）：LLM 判断 -> 工具调用 -> 循环直到给出文本回复
+# OneFlow Agent 循环（核心）：LLM 判断 -> 工具调用 -> 循环直到给出文本回复。
+# 记忆召回在 memory_recall.py，确认/信任在 confirm.py，委派执行在 subagent.py。
 import asyncio
 import json
-import math
-from datetime import datetime, timezone
 
 from ..config import settings
 from ..db import SessionLocal  # noqa: F401  保持与规范一致的依赖导入
 from ..learn.hook import get_trust_level
-from ..models import Message, PendingAction, ToolCallLog, UserMemory
-from ..tools.registry import execute, needs_confirmation, schemas
+from ..models import Message, PendingAction, ToolCallLog
+from ..tools.registry import execute, schemas
 from . import llm as llm_mod
+from .confirm import _is_cancel, _is_confirm, _needs_confirm, _pending_summary
 from .context import trim_history
+from .memory_recall import _recall_memories  # noqa: F401  兼容导出（测试从本模块导入）
 from .prompts import SYSTEM_PROMPT
-
-# 确认/取消口令（语音场景下宽松匹配前缀）
-CONFIRM_PHRASES = ("确认", "是的", "好的", "对", "可以", "没问题", "执行", "嗯", "要")
-CANCEL_PHRASES = ("取消", "不要", "算了", "不用")
-
-# auto 档下仍强制确认的高危操作：删除类不可逆操作。
-# 新增不可恢复的写操作时在此登记；普通写操作（记账/定时任务增删）auto 档直接放行。
-HIGH_RISK_TOOLS = frozenset({"delete_custom_agent"})
-
-# 记忆遗忘衰减：召回分数乘 exp(-闲置天数/120)；闲置超 90 天且权重低于阈值的不再注入
-MEMORY_DECAY_DAYS = 120
-MEMORY_STALE_DAYS = 90
-MEMORY_MIN_WEIGHT = 0.05
-
-
-def _needs_confirm(tool_name: str, trust_level: str) -> bool:
-    """按信任等级决定工具调用是否进确认分支。
-
-    ask_all：每个工具调用前都确认（复用高危 pending 机制）；
-    standard：现状——仅高危写操作（requires_confirm）确认；
-    auto：普通写操作直接执行，删除类高危仍强制确认。
-    delegate 始终除外：由引擎异步委派，进 pending 会导致确认后 execute 失败。
-    """
-    if tool_name == "delegate":
-        return False
-    if trust_level == "ask_all":
-        return True
-    if not needs_confirmation(tool_name):
-        return False
-    return trust_level != "auto" or tool_name in HIGH_RISK_TOOLS
-
-
-def _is_confirm(text: str) -> bool:
-    t = text.strip()
-    return any(t == p or t.startswith(p) for p in CONFIRM_PHRASES)
-
-
-def _is_cancel(text: str) -> bool:
-    t = text.strip()
-    return any(t == p or t.startswith(p) for p in CANCEL_PHRASES)
+from .subagent import execute_delegate
 
 
 async def _emit(on_event, event: dict) -> None:
@@ -80,92 +42,6 @@ def _tool_schemas(db, user_id: int) -> list:
                     "可选：" + " | ".join(names)
                 )
     return result
-
-
-def _memory_idle_days(m, now: datetime) -> int:
-    """记忆闲置天数：自上次访问算起（从未访问则按更新时间），时区缺失按 UTC 处理。"""
-    ref = m.last_accessed or m.updated_at or m.created_at
-    if ref is None:
-        return 0
-    if ref.tzinfo is None:
-        ref = ref.replace(tzinfo=timezone.utc)
-    return max(0, (now - ref).days)
-
-
-def _memory_decay(idle_days: int) -> float:
-    """衰减系数 exp(-闲置天数/120)：越久没被想起，权重越低。"""
-    return math.exp(-idle_days / MEMORY_DECAY_DAYS)
-
-
-async def _recall_memories(db, user, user_msg: str, cfg) -> list[str]:
-    """记忆召回：语义相似度 × 时间衰减排序；无向量时回退最近度排序。
-
-    读时更新 last_accessed（重置衰减）；闲置超 90 天且衰减后权重过低的记忆不再注入。
-    """
-    from .embed import cosine, embed_text, json_to_embedding
-
-    rows = (
-        db.query(UserMemory)
-        .filter(UserMemory.user_id == user.id, UserMemory.status == "active")
-        .order_by(UserMemory.updated_at.desc())
-        .limit(50)
-        .all()
-    )
-    if not rows:
-        return []
-    now = datetime.now(timezone.utc)
-    query_vec = await embed_text(user_msg, cfg)
-
-    scored = []
-    semantic = query_vec is not None and any(json_to_embedding(m.embedding) for m in rows)
-    if semantic:
-        for m in rows:
-            vec = json_to_embedding(m.embedding)
-            if vec is None:
-                continue
-            idle = _memory_idle_days(m, now)
-            score = cosine(query_vec, vec) * _memory_decay(idle)
-            if idle > MEMORY_STALE_DAYS and score < MEMORY_MIN_WEIGHT:
-                continue
-            scored.append((score, m))
-    if not scored:
-        # 回退：无查询向量 / 记忆全无向量 → 按衰减后的最近度排序
-        for m in rows:
-            idle = _memory_idle_days(m, now)
-            decay = _memory_decay(idle)
-            if idle > MEMORY_STALE_DAYS and decay < MEMORY_MIN_WEIGHT:
-                continue
-            scored.append((decay, m))
-
-    if not scored:
-        return []
-    scored.sort(key=lambda x: x[0], reverse=True)
-    selected = [m for _score, m in scored[: (5 if semantic else 20)]]
-
-    # 读时更新 last_accessed（遗忘衰减的「被想起」信号）
-    stamp = datetime.now(timezone.utc)
-    for m in selected:
-        m.last_accessed = stamp
-    db.commit()
-    return [m.content for m in selected]
-
-
-def _pending_summary(tool_name: str, args: dict) -> str:
-    """高危操作的确认描述（给用户看的人话）。"""
-    if tool_name == "add_expense":
-        category = args.get("category") or "未分类"
-        note = f"，备注：{args['note']}" if args.get("note") else ""
-        return f"我将为您记一笔支出：{args.get('amount')} 元（{category}）{note}"
-    if tool_name == "create_scheduled_task":
-        return (
-            f"我将创建定时任务「{args.get('title')}」"
-            f"（{args.get('kind')}，{int(args.get('hour', 0)):02d}:{int(args.get('minute') or 0):02d} 执行）"
-        )
-    if tool_name == "cancel_scheduled_task":
-        return f"我将取消定时任务（id={args.get('task_id')}）"
-    if tool_name == "delete_custom_agent":
-        return f"我将删除自定义子智能体「{args.get('name')}」"
-    return f"我将执行高危操作 {tool_name}({json.dumps(args, ensure_ascii=False)})"
 
 
 async def run_agent(
@@ -369,25 +245,9 @@ async def run_agent(
                 {"type": "tool_call", "tool": tc.name, "arguments": tc.arguments},
             )
             if tc.name == "delegate":
-                agent_name = tc.arguments.get("agent_name")
-                instruction = tc.arguments.get("instruction")
-                from .subagent import resolve_agent, run_subagent
-
-                if resolve_agent(db, user.id, agent_name) is None:
-                    result = {"success": False, "error": f"未知子智能体: {agent_name}，可先用 list_custom_agents 查看"}
-                else:
-                    try:
-                        sub_text, sub_steps = await run_subagent(
-                            db, user, agent_name, instruction, cfg
-                        )
-                        result = {
-                            "success": True,
-                            "agent": agent_name,
-                            "text": sub_text,
-                            "steps": sub_steps,
-                        }
-                    except Exception as e:
-                        result = {"success": False, "error": f"子智能体执行失败: {e}"}
+                result = await execute_delegate(
+                    db, user, tc.arguments.get("agent_name"), tc.arguments.get("instruction"), cfg
+                )
             else:
                 result = execute(tc.name, tc.arguments, user, db, cfg=cfg)
             success = result.get("success", False)
