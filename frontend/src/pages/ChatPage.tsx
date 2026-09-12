@@ -2,12 +2,10 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { MotionConfig, AnimatePresence, motion, type Variants } from 'framer-motion'
 import { listConversations } from '../api/conversations'
-import { listNotifications, markNotificationRead } from '../api/notifications'
 import { streamChat, type StreamStep } from '../api/chat'
-import { getIdleHint } from '../api/idleHint'
 import { tts } from '../api/tts'
 import LearnProposalCard from '../components/LearnProposalCard'
-import AiCore, { type ReactiveLevel } from '../components/AiCore'
+import AiCore from '../components/AiCore'
 import ParticleField from '../components/ParticleField'
 import SceneFX from '../components/SceneFX'
 import CommandDock from '../components/CommandDock'
@@ -23,10 +21,11 @@ import { getDesktopBridge } from '../lib/speech/bridge'
 import { startStandby } from '../lib/speech/asr'
 import { startLocalStandby } from '../lib/speech/local'
 import { pickQuip, resetQuipProgress } from '../lib/quips'
-import { getLevel, startMicAnalyser } from '../lib/audioReactive'
 import { toPlainText } from '../lib/plain'
 import { useConversations } from '../hooks/useConversations'
 import { useHud } from '../hooks/useHud'
+import { useProactive } from '../hooks/useProactive'
+import { useCoreReactive } from '../hooks/useCoreReactive'
 
 // 致命识别错误码：命中则不再假装监听，停掉待命并明确提示；其余（no-speech/aborted 等）由重挂自愈
 const FATAL_SR_ERRORS = ['not-allowed', 'service-not-allowed', 'network', 'bad-grammar']
@@ -54,7 +53,8 @@ export default function ChatPage() {
   const user = useAuthStore((state) => state.user)
   const logout = useAuthStore((state) => state.logout)
   const hud = useHud()
-  const { setError } = hud
+  // 回调里只依赖 useHud 的稳定原语（解构引用），避免依赖整个每渲染新建的 hud 对象
+  const { setError, showToast, clearToast, showEcho, showJarvisEcho, holdJarvisEcho, fadeJarvisEcho } = hud
   const convo = useConversations(setError, () => setInput(''))
   const { conversations, activeId, setActiveId, setConversations, messages, loadingMessages, expandedTraces, setExpandedTraces, loadMessages, newChat } = convo
   const [input, setInput] = useState('')
@@ -70,9 +70,6 @@ export default function ChatPage() {
   // 忙闲标记（供通知轮询判断是否顺延，避免播报撞车）
   const sendingRef = useRef(false)
   const voiceLiveRef = useRef(false)
-  // 闲置轻推：最近一次交互时间 + 本会话搭话次数（频控上限 2）
-  const lastInteractionRef = useRef(Date.now())
-  const chatterCountRef = useRef(0)
   const [trayOpen, setTrayOpen] = useState(false)
   const [voiceLive, setVoiceLive] = useState(false)
   const [corePulse, setCorePulse] = useState(0)
@@ -90,6 +87,9 @@ export default function ChatPage() {
   const lastSpeakEndRef = useRef(0)
   const [showInput] = useState(() => getPrefs().showInput)
   const [micAvailable] = useState(() => typeof navigator !== 'undefined' && !!navigator.mediaDevices?.getUserMedia)
+  // 3D 核心声动数据源（播报律动 + 麦克风驱动共用 reactiveLevelRef）
+  const core = useCoreReactive(micAvailable, setError)
+  const { reactiveLevelRef, beginSpeakAnim, endSpeakAnim } = core
   const standbyStopRef = useRef<(() => void) | null>(null)
   const standbyOnRef = useRef(false)
   const voiceOnRef = useRef(false)
@@ -103,15 +103,6 @@ export default function ChatPage() {
   // 播报安全网定时器：音频 ended 事件异常不触发时兜底恢复监听
   const voiceSafetyRef = useRef<number | null>(null)
   const transcriptTimerRef = useRef<number | null>(null)
-  // 声音驱动链路（rAF 每帧写 ref，避免每帧 setState）
-  const voiceReactiveOnRef = useRef(false)
-  // 播报律动：voiceLive 期间向 AiCore 写入模拟音频幅度（音频驱动开关时让位给真实麦克风）
-  const speakAnimRef = useRef<number | null>(null)
-  const analyserRef = useRef<AnalyserNode | null>(null)
-  const dataArrayRef = useRef<Uint8Array<ArrayBuffer> | null>(null)
-  const analyserCleanupRef = useRef<(() => void) | null>(null)
-  const voiceRafRef = useRef<number | null>(null)
-  const reactiveLevelRef = useRef<ReactiveLevel>({ vol: 0, low: 0 })
 
   /** 语音播报一段文本：分句流水线（首句合成完即开播，合成与播放交错）+ 暂停待命防回声。
    *  followUp=true 时（仅对话回复）播完进免唤醒跟随窗口；显示与声音对齐：播报期间文字不淡出。 */
@@ -124,37 +115,23 @@ export default function ChatPage() {
       standbyActionsRef.current.pause()
     }
     // 播报期间回显文字保持展示，播完才淡出（消除“字先消失声音才来”的错位）
-    hud.holdJarvisEcho()
+    holdJarvisEcho()
     // 全息核心随播报律动（音频驱动开启时不覆盖真实麦克风数据）
-    if (!voiceReactiveOnRef.current && speakAnimRef.current === null) {
-      const startedAt = performance.now()
-      const loop = () => {
-        const t = (performance.now() - startedAt) / 1000
-        const vol = 0.22 + 0.14 * Math.abs(Math.sin(t * 7.3)) + Math.random() * 0.06
-        reactiveLevelRef.current = { vol, low: vol * 0.85 }
-        speakAnimRef.current = window.requestAnimationFrame(loop)
-      }
-      speakAnimRef.current = window.requestAnimationFrame(loop)
-    }
-    const stopSpeakAnim = () => {
-      if (speakAnimRef.current !== null) window.cancelAnimationFrame(speakAnimRef.current)
-      speakAnimRef.current = null
-      if (!voiceReactiveOnRef.current) reactiveLevelRef.current = { vol: 0, low: 0 }
-    }
+    beginSpeakAnim()
     const chainId = ++speakChainRef.current
     // 全部句子播完后收尾；被新链取代的旧链不做收尾（新链接管待命恢复）
     const finish = () => {
       if (speakChainRef.current !== chainId) return
       speakChainRef.current = 0
       setVoiceLive(false); voiceLiveRef.current = false
-      stopSpeakAnim()
+      endSpeakAnim()
       lastSpeakEndRef.current = Date.now()
       if (resumeStandbyRef.current) {
         resumeStandbyRef.current = false
         if (!standbyOnRef.current) standbyActionsRef.current.resume()
         if (followUp && standbyOnRef.current) enterFollowUpWindow()
       }
-      hud.fadeJarvisEcho(3500)
+      fadeJarvisEcho(3500)
     }
     // 分句预取流水线：合成器持续预取后续句子，与播放重叠——消除句间空白。
     // 单句合成失败标记 failed，由播放循环回退浏览器语音读该句；被打断则整链作废。
@@ -211,18 +188,22 @@ export default function ChatPage() {
       voiceSafetyRef.current = null
       finish()
     }, Math.min(8000 + plain.length * 320, 120000))
-  }, [hud])
+  }, [holdJarvisEcho, fadeJarvisEcho, beginSpeakAnim, endSpeakAnim])
+
+  // 主动服务（通知轮询 + 闲置轻推）紧随 speakReply 声明，依赖其最新实现
+  const proactive = useProactive({ sendingRef, voiceLiveRef, standbyOnRef, voiceOnRef, speakReply, showJarvisEcho, holdJarvisEcho, fadeJarvisEcho })
+  const { bumpInteraction } = proactive
 
   const doSend = useCallback((rawText: string) => {
     const text = rawText.trim()
     if (!text) return
     // 忙时不再静默丢弃：明确告知用户上一件事还在处理
-    if (sending) { hud.showToast('正在处理上一件事，请稍候'); return }
-    hud.clearToast()
-    lastInteractionRef.current = Date.now()
+    if (sending) { showToast('正在处理上一件事，请稍候'); return }
+    clearToast()
+    bumpInteraction()
     setInput(''); setSending(true); sendingRef.current = true; setError('')
     // 右上角「OPERATOR + 内容」只显示一次，~2s 自动消失；不再进左侧时间线
-    hud.showEcho(text)
+    showEcho(text)
     setCorePulse((value) => value + 1)
     liveTextRef.current = ''
     hadErrorRef.current = false
@@ -232,8 +213,8 @@ export default function ChatPage() {
       // 真流式打字机：delta 增量实时进右上角 JARVIS 回显
       if (hadErrorRef.current) return
       liveTextRef.current += piece
-      hud.showJarvisEcho(liveTextRef.current)
-      hud.holdJarvisEcho()
+      showJarvisEcho(liveTextRef.current)
+      holdJarvisEcho()
     }, (response) => {
       setLiveTool('')
       if (activeId === null) { setActiveId(response.conversation_id); listConversations().then(setConversations).catch(() => {}) }
@@ -246,16 +227,16 @@ export default function ChatPage() {
         return
       }
       // 右上角 JARVIS 回复回显：语音开启时文字保持到播完才淡出（显示与声音对齐）
-      hud.showJarvisEcho(toPlainText(response.reply))
-      hud.holdJarvisEcho()
-      if (!voiceOnRef.current) hud.fadeJarvisEcho(3500)
+      showJarvisEcho(toPlainText(response.reply))
+      holdJarvisEcho()
+      if (!voiceOnRef.current) fadeJarvisEcho(3500)
       speakReply(toPlainText(response.reply), true)
     }, (reason) => {
       // 发送失败/服务端 error 事件：顶部 Toast；标记出错防播报错误文本
       hadErrorRef.current = true
       setLiveTool('')
-      hud.showJarvisEcho(null)
-      hud.showToast(reason.message)
+      showJarvisEcho(null)
+      showToast(reason.message)
     }, (step: StreamStep) => {
       // 工具步骤实时上遥测：calling 显示工具名，done 回落思考态
       setLiveTool(step.status === 'calling' ? step.tool : '')
@@ -263,10 +244,10 @@ export default function ChatPage() {
       // 高危操作待确认：弹确认条，点按钮或语音说“确认/取消”均可
       setPendingConfirm(pending)
     }).finally(() => { setSending(false); sendingRef.current = false })
-  }, [activeId, sending, setActiveId, setConversations, hud, setError, speakReply])
+  }, [activeId, sending, setActiveId, setConversations, showToast, clearToast, showEcho, showJarvisEcho, holdJarvisEcho, fadeJarvisEcho, setError, speakReply, bumpInteraction])
 
   const handleWake = useCallback((command: string) => {
-    lastInteractionRef.current = Date.now()
+    bumpInteraction()
     setWakeStatus('已唤醒'); stopAudio(); stopSpeaking()
     playWakeTone()
     // 播报链被打断后，若 1.5s 内没有新播报接管，恢复待命（防卡在暂停态）
@@ -299,10 +280,10 @@ export default function ChatPage() {
         night: hour >= 23 || hour < 5,
         afterSpeak: Date.now() - lastSpeakEndRef.current < 60000,
       })
-      hud.showJarvisEcho(quip)
+      showJarvisEcho(quip)
       speakReply(quip)
     }, 3500)
-  }, [doSend, speakReply, hud])
+  }, [doSend, speakReply, showJarvisEcho, bumpInteraction])
   const handleWakeRef = useRef(handleWake); handleWakeRef.current = handleWake
   // 会话模式事件：进入 → UI 状态；退出（用户说退下/闲置超时）→ 告别播报
   const handleConvo = useCallback((event: ConvoEvent) => {
@@ -310,9 +291,9 @@ export default function ChatPage() {
     setConvoOn(false)
     setWakeStatus('')
     const line = event.reason === 'timeout' ? '那我先退下了，先生。' : '好的，先生，我先退下了。'
-    hud.showJarvisEcho(line)
+    showJarvisEcho(line)
     speakReply(line)
-  }, [speakReply, hud])
+  }, [speakReply, showJarvisEcho])
   const handleConvoRef = useRef(handleConvo); handleConvoRef.current = handleConvo
   const stopStandbyLocal = useCallback((opts?: { keepConvo?: boolean }) => { standbyOnRef.current = false; if (standbyTimerRef.current) window.clearTimeout(standbyTimerRef.current); standbyStopRef.current?.(); standbyStopRef.current = null; resetWakeState(opts?.keepConvo ?? false); if (opts?.keepConvo) bumpConvoIdle(); setStandbyOn(false); setStandbyLive(''); setWakeStatus('') }, [])
   // 致命识别错误：不再假装监听，停掉待命并明确提示；瞬态错误（no-speech/aborted 等）由重挂自愈
@@ -358,41 +339,6 @@ export default function ChatPage() {
   armStandbyRef.current = armStandby
   standbyActionsRef.current = { pause: () => stopStandbyLocal({ keepConvo: true }), resume: armStandby }
 
-  const stopVoiceReactive = useCallback(() => {
-    voiceReactiveOnRef.current = false
-    if (voiceRafRef.current !== null) window.cancelAnimationFrame(voiceRafRef.current)
-    voiceRafRef.current = null
-    reactiveLevelRef.current = { vol: 0, low: 0 }
-    analyserCleanupRef.current?.()
-    analyserCleanupRef.current = null
-    analyserRef.current = null
-    dataArrayRef.current = null
-  }, [])
-
-  const startVoiceReactive = useCallback(() => {
-    if (voiceReactiveOnRef.current) return
-    if (!micAvailable) { setError('当前设备不支持麦克风'); return }
-    setError('')
-    startMicAnalyser()
-      .then(({ analyser, cleanup }) => {
-        analyserRef.current = analyser
-        analyserCleanupRef.current = cleanup
-        dataArrayRef.current = new Uint8Array(analyser.frequencyBinCount)
-        voiceReactiveOnRef.current = true
-        const loop = () => {
-          if (!voiceReactiveOnRef.current || !analyserRef.current || !dataArrayRef.current) return
-          reactiveLevelRef.current = getLevel(analyserRef.current, dataArrayRef.current)
-          voiceRafRef.current = window.requestAnimationFrame(loop)
-        }
-        voiceRafRef.current = window.requestAnimationFrame(loop)
-      })
-      .catch(() => {
-        voiceReactiveOnRef.current = false
-        setError('无法启用声音驱动（麦克风无权限）')
-      })
-  }, [micAvailable, setError])
-  const startVoiceReactiveRef = useRef(startVoiceReactive); startVoiceReactiveRef.current = startVoiceReactive
-
   useEffect(() => {
     const prefs = getPrefs(); voiceOnRef.current = prefs.voice
     const unlock = () => { unlockAudio(); const audio = new Audio(); audio.src = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA='; audio.volume = 0; audio.play().catch(() => {}); window.removeEventListener('pointerdown', unlock); window.removeEventListener('keydown', unlock) }
@@ -401,77 +347,8 @@ export default function ChatPage() {
     const bridge = getDesktopBridge()
     if (bridge && !bridge.asrAvailable()) setError('本地语音模型未下载：在 desktop 目录执行 npm run models（当前已回退浏览器识别）')
     if (prefs.standby) standbyTimerRef.current = window.setTimeout(armStandby, 400)
-    if (prefs.audioDrive) startVoiceReactiveRef.current()
-    return () => { resumeStandbyRef.current = false; stopStandbyLocal(); stopVoiceReactive(); if (speakAnimRef.current !== null) window.cancelAnimationFrame(speakAnimRef.current); if (quipTimerRef.current !== null) window.clearTimeout(quipTimerRef.current); if (voiceSafetyRef.current) window.clearTimeout(voiceSafetyRef.current); if (transcriptTimerRef.current !== null) window.clearTimeout(transcriptTimerRef.current); window.removeEventListener('pointerdown', unlock); window.removeEventListener('keydown', unlock) }
-  }, [armStandby, stopStandbyLocal, stopVoiceReactive, setError])
-
-  // 主动通知轮询：定时任务播报/日程提醒 → 右上角展示 + 语音播报 + 标记已读
-  useEffect(() => {
-    let cancelled = false
-    const poll = async () => {
-      // 忙时顺延：对话进行中或正在播报时不打断，下一轮再拉
-      if (cancelled || sendingRef.current || voiceLiveRef.current) return
-      const list = await listNotifications()
-      if (cancelled || list.length === 0) return
-      const latest = list[0]
-      // 页面隐藏时升级成系统通知（需用户授权，拒绝则静默）
-      if (document.hidden && typeof Notification !== 'undefined') {
-        if (Notification.permission === 'default') {
-          Notification.requestPermission().catch(() => {})
-        }
-        if (Notification.permission === 'granted') {
-          try {
-            new Notification(latest.title, { body: toPlainText(latest.content).slice(0, 120), icon: '/icon.svg' })
-          } catch {
-            // 部分浏览器要求走 ServiceWorker 注册，失败则退回页内展示
-          }
-        }
-      }
-      lastInteractionRef.current = Date.now()
-      // 多条合并成一段播报；system_error 类只展示不播报（避免 TTS 读报错详情）
-      const speakable = list.filter((note) => note.kind !== 'system_error')
-      const display = list.length === 1
-        ? `【${latest.title}】${toPlainText(latest.content)}`
-        : `【${latest.title}】等 ${list.length} 条新通知`
-      hud.showJarvisEcho(display)
-      hud.holdJarvisEcho()
-      if (speakable.length > 0) {
-        const speakText = speakable
-          .map((note) => `${note.title}：${toPlainText(note.content)}`)
-          .join('。')
-          .slice(0, 500)
-        // followUp=true：播报期间麦克风本就暂停，播完后用户接话无回声风险，直接免唤醒派发；
-        // 文字由 speakReply 接管（播完才淡出）
-        speakReply(speakText, true)
-      } else {
-        hud.fadeJarvisEcho(6000)
-      }
-      for (const note of list) void markNotificationRead(note.id)
-    }
-    void poll()
-    const timer = window.setInterval(() => void poll(), 15000)
-    return () => { cancelled = true; window.clearInterval(timer) }
-  }, [speakReply, hud])
-
-  // 闲置轻推：长时间无交互时贾维斯主动说一句（每会话最多 2 次，宁缺毋滥）
-  useEffect(() => {
-    const IDLE_MS = 20 * 60 * 1000
-    const timer = window.setInterval(async () => {
-      if (!getPrefs().chitchat) return
-      if (sendingRef.current || voiceLiveRef.current || !standbyOnRef.current) return
-      if (chatterCountRef.current >= 2) return
-      if (Date.now() - lastInteractionRef.current < IDLE_MS) return
-      const hint = await getIdleHint()
-      if (!hint || !hint.text || chatterCountRef.current >= 2) return
-      chatterCountRef.current += 1
-      lastInteractionRef.current = Date.now()
-      hud.showJarvisEcho(hint.text)
-      hud.holdJarvisEcho()
-      if (!voiceOnRef.current) hud.fadeJarvisEcho(6000)
-      speakReply(hint.text, true)
-    }, 60000)
-    return () => window.clearInterval(timer)
-  }, [speakReply, hud])
+    return () => { resumeStandbyRef.current = false; stopStandbyLocal(); if (quipTimerRef.current !== null) window.clearTimeout(quipTimerRef.current); if (voiceSafetyRef.current) window.clearTimeout(voiceSafetyRef.current); if (transcriptTimerRef.current !== null) window.clearTimeout(transcriptTimerRef.current); window.removeEventListener('pointerdown', unlock); window.removeEventListener('keydown', unlock) }
+  }, [armStandby, stopStandbyLocal, setError])
 
   const hasConversation = messages.length > 0
   const coreState = sending ? 'thinking' : voiceLive ? 'speaking' : standbyOn ? 'standby' : undefined
