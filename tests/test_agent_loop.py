@@ -61,6 +61,9 @@ def test_agent_loop_success(db_session, monkeypatch):
     db = db_session()
     user, conv = _new_conv(db, "agent_alice")
     monkeypatch.setattr("app.tools.weather.httpx.Client", lambda timeout: FakeWeatherClient())
+    # 钉空全局 key：test_learn_b 会话级补的 key 会让 classify_mood 多消费一次
+    # fake_chat 回复（情绪分类），导致本用例的回复序列错位
+    monkeypatch.setattr(settings, "llm_api_key", "")
 
     replies = [
         LLMResult(tool_call=ToolCall("get_weather", {"city": "北京"})),

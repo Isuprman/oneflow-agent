@@ -6,6 +6,7 @@ import pytest
 
 import app.agent.llm as llm_mod
 from app.agent.llm import LLMResult
+from app.config import settings
 from app.learn import companion
 
 
@@ -125,6 +126,9 @@ def test_engine_intercepts_away_command(db_session, user, monkeypatch):
 
 def test_mood_no_key_defaults_calm(monkeypatch):
     """未配置 LLM 密钥时不发分类请求，直接按 calm 处理。"""
+    # 守卫条件含全局 settings.llm_api_key：test_learn_b 会话级补的 key 会让
+    # 本用例的「无 key」前提失效，钉空保证用例自洽
+    monkeypatch.setattr(settings, "llm_api_key", "")
     calls: list = []
 
     async def fake_chat(messages, tools, cfg=None, on_delta=None, **kw):
