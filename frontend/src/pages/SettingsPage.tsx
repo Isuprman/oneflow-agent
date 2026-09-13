@@ -7,9 +7,11 @@ import TasksSection from './settings/TasksSection'
 import NotificationsSection from './settings/NotificationsSection'
 import MemoriesSection from './settings/MemoriesSection'
 import SkillsSection from './settings/SkillsSection'
+import MarketSection from './settings/MarketSection'
 import TrustSection from './settings/TrustSection'
 import McpSection from './settings/McpSection'
 import ScenesSection from './settings/ScenesSection'
+import PrivacySection from './settings/PrivacySection'
 
 // 控制台设置：纯布局壳；每个功能区块是 pages/settings/ 下的自包含组件（state/加载/交互随区块走）
 export default function SettingsPage() {
@@ -39,11 +41,15 @@ export default function SettingsPage() {
 
         <SkillsSection />
 
+        <MarketSection />
+
         <TrustSection />
 
         <McpSection />
 
         <ScenesSection />
+
+        <PrivacySection />
       </div>
     </main>
   )
