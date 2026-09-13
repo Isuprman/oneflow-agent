@@ -294,3 +294,31 @@ class AwayRule(Base):
     rule_text = Column(Text, nullable=False)
     enabled = Column(Integer, default=1)
     created_at = Column(DateTime, default=now)
+
+
+class KnowledgeDoc(Base):
+    """RAG 知识库文档：用户上传的 txt/md/pdf，切块 embedding 后供 search_knowledge 召回。
+
+    status: pending（切块/嵌入进行中）→ ready / failed（error 存失败原因，如扫描件无文字层）。
+    """
+    __tablename__ = "knowledge_docs"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    filename = Column(String(255), nullable=False)
+    status = Column(String(16), default="pending", nullable=False)
+    error = Column(Text)
+    size = Column(Integer, default=0)
+    chunk_count = Column(Integer, default=0)
+    created_at = Column(DateTime, default=now)
+    updated_at = Column(DateTime, default=now, onupdate=now)
+
+
+class KnowledgeChunk(Base):
+    """知识库切块：一段原文 + 向量。召回按余弦相似度，不做时间衰减（知识不会「忘」）。"""
+    __tablename__ = "knowledge_chunks"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    doc_id = Column(Integer, ForeignKey("knowledge_docs.id", ondelete="CASCADE"), nullable=False, index=True)
+    idx = Column(Integer, nullable=False, default=0)
+    content = Column(Text, nullable=False)
+    embedding = Column(Text)  # JSON 向量
