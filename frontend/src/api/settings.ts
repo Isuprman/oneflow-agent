@@ -6,7 +6,7 @@ export async function getLlmConfig(): Promise<LlmConfig> {
     const resp = await http.get('/settings/llm')
     return resp.data as LlmConfig
   } catch (error) {
-    throw new Error(getErrorMessage(error))
+    throw new Error(getErrorMessage(error), { cause: error })
   }
 }
 
@@ -15,7 +15,7 @@ export async function saveLlmConfig(data: LlmConfigIn): Promise<LlmConfig> {
     const resp = await http.put('/settings/llm', data)
     return resp.data as LlmConfig
   } catch (error) {
-    throw new Error(getErrorMessage(error))
+    throw new Error(getErrorMessage(error), { cause: error })
   }
 }
 
@@ -24,7 +24,7 @@ export async function getHotelConfig(): Promise<HotelConfig> {
     const resp = await http.get('/settings/hotel')
     return resp.data as HotelConfig
   } catch (error) {
-    throw new Error(getErrorMessage(error))
+    throw new Error(getErrorMessage(error), { cause: error })
   }
 }
 
@@ -33,6 +33,6 @@ export async function saveHotelConfig(data: HotelConfigIn): Promise<HotelConfig>
     const resp = await http.put('/settings/hotel', data)
     return resp.data as HotelConfig
   } catch (error) {
-    throw new Error(getErrorMessage(error))
+    throw new Error(getErrorMessage(error), { cause: error })
   }
 }

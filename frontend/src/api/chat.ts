@@ -9,7 +9,7 @@ export async function sendChat(
     const resp = await http.post('/chat', { conversation_id, message })
     return resp.data as ChatResponse
   } catch (error) {
-    throw new Error(getErrorMessage(error))
+    throw new Error(getErrorMessage(error), { cause: error })
   }
 }
 

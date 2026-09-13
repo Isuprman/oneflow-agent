@@ -13,6 +13,7 @@
  * - U+FE00–U+FE0F：变体选择符
  * - U+20E3 / U+200D：组合键帽符 / 零宽连接符
  */
+// eslint-disable-next-line no-misleading-character-class -- 键帽符(U+20E3)与零宽连接符(U+200D)是有意纳入的 emoji 组成部分
 const EMOJI_RE = /[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{2300}-\u{23FF}\u{25A0}-\u{25FF}\u{2190}-\u{21FF}\u{FE00}-\u{FE0F}\u{20E3}\u{200D}]/gu
 
 /** 剔除文本中的常见 emoji 与符号（可复用）。 */

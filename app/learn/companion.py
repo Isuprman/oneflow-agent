@@ -45,10 +45,32 @@ def _parse_mood(text: str) -> str:
     return "calm"
 
 
+# 启发式标记词：命中即直接定级，省一次分类调用。只收语义明确的词，
+# 拿不准的一律交给 LLM 分类（返回 None）。
+_FRUSTRATION_MARKS = ("气死", "烦死", "生气", "受不了", "服了", "无语", "搞什么", "怎么回事", "能不能行", "滚")
+_TIRED_MARKS = ("好累", "太累", "累死", "困死", "没力气", "撑不住", "熬不动", "睁不开")
+
+
+def _heuristic_mood(text: str) -> str | None:
+    """无 LLM 的情绪预判：返回 calm/frustrated/tired 或 None（交 LLM 分类）。"""
+    t = (text or "").strip()
+    if not t:
+        return None
+    if any(mark in t for mark in _FRUSTRATION_MARKS):
+        return "frustrated"
+    if any(mark in t for mark in _TIRED_MARKS):
+        return "tired"
+    # 超短且无情绪标记的日常指令（"几点""开着""在吗"）直接按 calm
+    if len(t) <= 4:
+        return "calm"
+    return None
+
+
 async def classify_mood(user_msg: str, cfg: dict | None, user_id: int) -> str:
     """轻量情绪分类（tools=[]，输出 calm/frustrated/tired 三选一）。
 
     命中 10 分钟缓存直接返回；未配置 LLM、调用失败或输出无法识别一律默认 calm。
+    LLM 之前先走启发式：标记词命中或超短消息直接定级，日常短消息基本零分类开销。
     """
     cached = get_cached_mood(user_id)
     if cached is not None:
@@ -57,6 +79,10 @@ async def classify_mood(user_msg: str, cfg: dict | None, user_id: int) -> str:
     # 与 llm.chat 同样的前置守卫：没有可用密钥时不发无谓的分类请求，直接按 calm 处理
     if not (((cfg or {}).get("api_key")) or settings.llm_api_key):
         return "calm"
+
+    heuristic = _heuristic_mood(user_msg)
+    if heuristic is not None:
+        return heuristic
 
     from ..agent.llm import chat
 

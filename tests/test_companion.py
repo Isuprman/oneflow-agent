@@ -140,6 +140,29 @@ def test_mood_no_key_defaults_calm(monkeypatch):
     assert calls == []
 
 
+def test_mood_heuristic_short_circuits_llm(monkeypatch):
+    """标记词/超短消息走启发式直接定级，零 LLM 分类调用。"""
+    calls: list = []
+
+    async def fake_chat(messages, tools, cfg=None, on_delta=None, **kw):
+        calls.append(1)
+        return LLMResult(text="calm")
+
+    monkeypatch.setattr(llm_mod, "chat", fake_chat)
+    companion._mood_cache.clear()
+    assert asyncio.run(companion.classify_mood("烦死了", {"api_key": "k"}, user_id=801)) == "frustrated"
+    companion._mood_cache.clear()
+    assert asyncio.run(companion.classify_mood("太累了不想动", {"api_key": "k"}, user_id=802)) == "tired"
+    companion._mood_cache.clear()
+    # 长句无标记 → 交 LLM 分类（会调用 fake_chat）
+    assert asyncio.run(companion.classify_mood("帮我看看这个怎么处理比较好", {"api_key": "k"}, user_id=803)) == "calm"
+    assert len(calls) == 1
+    companion._mood_cache.clear()
+    # 超短无标记 → 直接 calm，同样不调 LLM
+    assert asyncio.run(companion.classify_mood("几点", {"api_key": "k"}, user_id=804)) == "calm"
+    assert len(calls) == 1
+
+
 # ─── 数字分身：开关与规则录入 ──────────────────────────────────────────
 
 

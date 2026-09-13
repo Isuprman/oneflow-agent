@@ -24,7 +24,7 @@ export async function listMcpServers(): Promise<McpServerOut[]> {
     const resp = await http.get('/mcp')
     return resp.data as McpServerOut[]
   } catch (error) {
-    throw new Error(getErrorMessage(error))
+    throw new Error(getErrorMessage(error), { cause: error })
   }
 }
 
@@ -33,7 +33,7 @@ export async function addMcpServer(data: McpServerIn): Promise<McpServerOut> {
     const resp = await http.post('/mcp', data)
     return resp.data as McpServerOut
   } catch (error) {
-    throw new Error(getErrorMessage(error))
+    throw new Error(getErrorMessage(error), { cause: error })
   }
 }
 
@@ -42,7 +42,7 @@ export async function toggleMcpServer(id: number, enabled: boolean): Promise<Mcp
     const resp = await http.put(`/mcp/${id}`, { enabled })
     return resp.data as McpServerOut
   } catch (error) {
-    throw new Error(getErrorMessage(error))
+    throw new Error(getErrorMessage(error), { cause: error })
   }
 }
 
@@ -50,7 +50,7 @@ export async function deleteMcpServer(id: number): Promise<void> {
   try {
     await http.delete(`/mcp/${id}`)
   } catch (error) {
-    throw new Error(getErrorMessage(error))
+    throw new Error(getErrorMessage(error), { cause: error })
   }
 }
 
@@ -59,6 +59,6 @@ export async function refreshMcpServer(name: string): Promise<McpServerOut> {
     const resp = await http.post(`/mcp/${name}/refresh`)
     return resp.data as McpServerOut
   } catch (error) {
-    throw new Error(getErrorMessage(error))
+    throw new Error(getErrorMessage(error), { cause: error })
   }
 }

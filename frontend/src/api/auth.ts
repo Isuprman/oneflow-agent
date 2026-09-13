@@ -6,7 +6,7 @@ export async function register(username: string, password: string): Promise<User
     const resp = await http.post('/auth/register', { username, password })
     return resp.data as UserOut
   } catch (error) {
-    throw new Error(getErrorMessage(error))
+    throw new Error(getErrorMessage(error), { cause: error })
   }
 }
 
@@ -15,7 +15,7 @@ export async function login(username: string, password: string): Promise<TokenOu
     const resp = await http.post('/auth/login', { username, password })
     return resp.data as TokenOut
   } catch (error) {
-    throw new Error(getErrorMessage(error))
+    throw new Error(getErrorMessage(error), { cause: error })
   }
 }
 
@@ -24,6 +24,6 @@ export async function me(): Promise<UserOut> {
     const resp = await http.get('/auth/me')
     return resp.data as UserOut
   } catch (error) {
-    throw new Error(getErrorMessage(error))
+    throw new Error(getErrorMessage(error), { cause: error })
   }
 }
