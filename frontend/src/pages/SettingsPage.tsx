@@ -10,6 +10,7 @@ import SkillsSection from './settings/SkillsSection'
 import MarketSection from './settings/MarketSection'
 import TrustSection from './settings/TrustSection'
 import McpSection from './settings/McpSection'
+import KnowledgeSection from './settings/KnowledgeSection'
 import ScenesSection from './settings/ScenesSection'
 import PrivacySection from './settings/PrivacySection'
 
@@ -46,6 +47,8 @@ export default function SettingsPage() {
         <TrustSection />
 
         <McpSection />
+
+        <KnowledgeSection />
 
         <ScenesSection />
 

@@ -27,12 +27,15 @@ def _isolate_settings():
 
 
 @pytest.fixture()
-def db_session():
+def db_session(monkeypatch):
     tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
     tmp.close()
     engine = create_engine(f"sqlite:///{tmp.name}", connect_args={"check_same_thread": False})
     TestingSessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
     Base.metadata.create_all(bind=engine)
+    # 后台任务（BackgroundTasks / jobs）经 app.db.SessionLocal 取会话：
+    # 测试中必须同样指向临时库，否则会读写开发者真实的 oneflow.db
+    monkeypatch.setattr("app.db.SessionLocal", TestingSessionLocal)
     try:
         yield TestingSessionLocal
     finally:
