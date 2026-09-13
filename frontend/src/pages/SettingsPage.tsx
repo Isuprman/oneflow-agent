@@ -4,6 +4,7 @@ import LlmSection from './settings/LlmSection'
 import HotelSection from './settings/HotelSection'
 import VoiceSection from './settings/VoiceSection'
 import TasksSection from './settings/TasksSection'
+import PlansSection from './settings/PlansSection'
 import NotificationsSection from './settings/NotificationsSection'
 import MemoriesSection from './settings/MemoriesSection'
 import SkillsSection from './settings/SkillsSection'
@@ -34,6 +35,8 @@ export default function SettingsPage() {
         <VoiceSection />
 
         <TasksSection />
+
+        <PlansSection />
 
         <NotificationsSection />
 

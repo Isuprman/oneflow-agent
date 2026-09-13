@@ -10,6 +10,7 @@ const NOTE_KIND_LABELS: Record<string, string> = {
   reminder: '日程提醒',
   care: '情景关怀',
   habit: '习惯洞察',
+  plan: '计划推进',
   system_error: '系统自检',
 }
 

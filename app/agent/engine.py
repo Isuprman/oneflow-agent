@@ -152,6 +152,15 @@ async def run_agent(
     profile = load_profile(db, user.id)
     if profile:
         system_text += "\n\n【用户画像】\n" + "\n".join(f"- {k}: {v}" for k, v in profile.items())
+    # 3.55 长程计划续接：active 计划摘要随对话注入，用户说「继续」即推进下一步
+    from ..tools.plans import load_active_plans_summary
+
+    plans_summary = load_active_plans_summary(db, user.id)
+    if plans_summary:
+        system_text += (
+            "\n\n【进行中的长期计划】\n" + plans_summary
+            + "\n用户说「继续」时，用 update_plan_step 推进下一步并简要汇报。"
+        )
     mem_contents = await _recall_memories(db, user, user_msg, cfg)
     if mem_contents:
         system_text += "\n\n【关于用户的长期记忆】\n" + "\n".join(f"- {c}" for c in mem_contents)
