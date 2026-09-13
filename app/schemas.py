@@ -115,6 +115,10 @@ class MemoryOut(BaseModel):
         from_attributes = True
 
 
+class MemoryUpdate(BaseModel):
+    content: str
+
+
 # ---------- 主动通知（定时任务播报/日程提醒） ----------
 class NotificationOut(BaseModel):
     id: int
