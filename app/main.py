@@ -151,6 +151,11 @@ from .routers import market as market_router
 
 app.include_router(privacy_router.router)
 app.include_router(knowledge_router.router)
+from .routers import plans as plans_router
+from .routers import market as market_router
+
+app.include_router(privacy_router.router)
+app.include_router(plans_router.router)
 app.include_router(market_router.router)
 
 # ---- 前端静态托管（仅在存在构建产物时启用，不影响纯 API 开发模式）----

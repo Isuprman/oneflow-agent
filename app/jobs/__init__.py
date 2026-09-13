@@ -4,7 +4,7 @@
 from dataclasses import dataclass
 from typing import Callable
 
-from . import away, checkups, care, habit_proposals, habits, interviews, reminders, skill_quality
+from . import away, checkups, care, habit_proposals, habits, interviews, plan_advancer, reminders, skill_quality
 
 
 @dataclass(frozen=True)
@@ -23,4 +23,5 @@ REGISTRY: list[Job] = [
     Job(label="技能质量检查", hour_gate=habits.HABIT_INSIGHT_HOUR, run=skill_quality.run),
     Job(label="反向面试", hour_gate=habits.HABIT_INSIGHT_HOUR, run=interviews.run),
     Job(label="年度体检", hour_gate=habits.HABIT_INSIGHT_HOUR, run=checkups.run),
+    Job(label="长程计划推进", hour_gate=8, run=plan_advancer.run),
 ]

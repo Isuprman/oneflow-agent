@@ -309,6 +309,19 @@ class KnowledgeDoc(Base):
     error = Column(Text)
     size = Column(Integer, default=0)
     chunk_count = Column(Integer, default=0)
+class LongTermPlan(Base):
+    """长程任务规划：跨会话的大目标，拆成一串带状态的步骤。
+
+    推进三层：对话续接（active 计划摘要注入 system prompt）、每日自动推进一步
+    （jobs/plan_advancer，每计划每天限一次）、用户随时暂停/放弃。
+    """
+    __tablename__ = "long_term_plans"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    title = Column(String(255), nullable=False)
+    goal = Column(Text, nullable=False, default="")
+    status = Column(String(16), default="active", nullable=False)  # active/paused/done/cancelled
+    last_advanced_at = Column(DateTime)  # 每日自动推进的限次标记（本地时间）
     created_at = Column(DateTime, default=now)
     updated_at = Column(DateTime, default=now, onupdate=now)
 
@@ -322,3 +335,12 @@ class KnowledgeChunk(Base):
     idx = Column(Integer, nullable=False, default=0)
     content = Column(Text, nullable=False)
     embedding = Column(Text)  # JSON 向量
+class PlanStep(Base):
+    """计划步骤：todo / doing / done / blocked；note 记录最近一次推进的产出摘要。"""
+    __tablename__ = "plan_steps"
+    id = Column(Integer, primary_key=True)
+    plan_id = Column(Integer, ForeignKey("long_term_plans.id", ondelete="CASCADE"), nullable=False, index=True)
+    idx = Column(Integer, nullable=False, default=0)
+    description = Column(Text, nullable=False)
+    status = Column(String(16), default="todo", nullable=False)
+    note = Column(Text)
