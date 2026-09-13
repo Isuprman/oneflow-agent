@@ -294,3 +294,21 @@ class AwayRule(Base):
     rule_text = Column(Text, nullable=False)
     enabled = Column(Integer, default=1)
     created_at = Column(DateTime, default=now)
+
+
+class SkillChain(Base):
+    """技能链：把一组指令固化成 agent 可自主调用的组合动作。
+
+    steps 为 JSON 数组（每步一条指令模板），支持 {{上一步}} 插值注入上一步回复
+    （纯文本替换，绝不 eval）。与情境剧本的分工：剧本由用户触发并播报；
+    技能链由 agent 判断调用，结果进对话上下文。
+    """
+    __tablename__ = "skill_chains"
+    __table_args__ = (UniqueConstraint("user_id", "name", name="uq_skill_chain_user_name"),)
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    name = Column(String(64), nullable=False)
+    description = Column(Text, default="")
+    steps = Column(Text, nullable=False)  # JSON: ["指令1", "指令2 {{上一步}}", ...]
+    enabled = Column(Integer, default=1)
+    created_at = Column(DateTime, default=now)
