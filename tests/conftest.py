@@ -7,8 +7,23 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from app.config import settings
 from app.db import Base, get_db
 from app.main import app
+
+
+@pytest.fixture(autouse=True)
+def _isolate_settings():
+    """每用例快照并还原 settings，杜绝测试间全局状态污染（保证顺序无关）。
+
+    背景：曾有测试文件在模块级改 settings.llm_api_key（收集阶段即生效），
+    污染整场运行——表现为单跑通过、全套失败。有此保险丝后，任何用例内对
+    settings 的临时修改（含绕过 monkeypatch 的直接赋值）都会在用例后还原。
+    """
+    snapshot = {name: getattr(settings, name) for name in type(settings).model_fields}
+    yield
+    for name, value in snapshot.items():
+        setattr(settings, name, value)
 
 
 @pytest.fixture()

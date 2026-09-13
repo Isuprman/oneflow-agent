@@ -12,15 +12,13 @@ from app.models import UserSetting
 from tests.test_learn import (
     _fake_builder,
     _force_subprocess_sandbox,  # noqa: F401 — autouse，import 即对本模块生效
+    _global_llm_key_fallback,  # noqa: F401 — 同上：全局兜底 key 的模块内补偿
     _register_and_login,
     git_repo,  # noqa: F401
 )
 
-# 会话级环境补偿：tests/test_learn.py 的直连 acquire 用例写于「存在全局兜底 key」
-# 的前提之下（llm_configured 的既有语义就是用户或全局任一非空），而本任务禁止
-# 修改该文件。这里为整个测试会话补一个非空全局 key，让旧契约继续成立；
-# 未配置 → 400 的新行为由下方用例自行把全局 key 清空后严格验证。
-settings.llm_api_key = settings.llm_api_key or "test-global-fallback"
+# 全局 key 的会话级补偿已改为 test_learn.py 内的 autouse fixture（import 即继承）：
+# 原先的模块级赋值在 pytest 收集阶段生效，曾污染其他测试文件（settings 泄漏事故）。
 
 
 def _setup_llm_config(db_session, user_id: int) -> None:
