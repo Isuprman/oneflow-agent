@@ -24,7 +24,7 @@ def test_delegate_delegates_to_subagent(db_session, monkeypatch):
 
     counter = {"n": 0}
 
-    async def fake_chat(messages, tools, cfg=None, on_delta=None):
+    async def fake_chat(messages, tools, cfg=None, on_delta=None, **kwargs):
         counter["n"] += 1
         if counter["n"] == 1:  # 总控：委派 finance
             return LLMResult(

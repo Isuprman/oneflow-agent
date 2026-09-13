@@ -23,7 +23,7 @@ def test_high_risk_tool_asks_confirmation(db_session, monkeypatch):
     db = db_session()
     user, conv = _setup(db, "confirm_ask")
 
-    async def fake_chat(messages, tools, cfg=None, on_delta=None):
+    async def fake_chat(messages, tools, cfg=None, on_delta=None, **kwargs):
         return LLMResult(tool_call=ToolCall("add_expense", {"amount": 50, "category": "餐饮"}))
 
     monkeypatch.setattr("app.agent.llm.chat", fake_chat)
@@ -56,7 +56,7 @@ def test_confirm_executes_pending(db_session, monkeypatch):
     )
     db.commit()
 
-    async def fake_chat(messages, tools, cfg=None, on_delta=None):
+    async def fake_chat(messages, tools, cfg=None, on_delta=None, **kwargs):
         return LLMResult(text="已为您记好")
 
     monkeypatch.setattr("app.agent.llm.chat", fake_chat)
@@ -85,7 +85,7 @@ def test_cancel_discards_pending_without_llm(db_session, monkeypatch):
     )
     db.commit()
 
-    async def boom(messages, tools, cfg=None, on_delta=None):
+    async def boom(messages, tools, cfg=None, on_delta=None, **kwargs):
         raise AssertionError("取消路径不应调用 LLM")
 
     monkeypatch.setattr("app.agent.llm.chat", boom)
@@ -111,7 +111,7 @@ def test_new_instruction_discards_pending(db_session, monkeypatch):
     )
     db.commit()
 
-    async def fake_chat(messages, tools, cfg=None, on_delta=None):
+    async def fake_chat(messages, tools, cfg=None, on_delta=None, **kwargs):
         return LLMResult(text="今天晴")
 
     monkeypatch.setattr("app.agent.llm.chat", fake_chat)

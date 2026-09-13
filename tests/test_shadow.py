@@ -129,7 +129,7 @@ def test_chat_stream_shadow_wiring(client, monkeypatch):
     """3 条消息走流式接口 → 收到影子模式通知；回「存为剧本」→ 建出剧本且不含确认指令本身。"""
     monkeypatch.setattr("app.routers.chat_stream.llm_configured", lambda db, uid: True)
 
-    async def fake_chat(messages, tools, cfg=None, on_delta=None):
+    async def fake_chat(messages, tools, cfg=None, on_delta=None, **kwargs):
         return LLMResult(text="好的")
 
     monkeypatch.setattr(llm_mod, "chat", fake_chat)

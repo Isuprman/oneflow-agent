@@ -70,7 +70,7 @@ def test_agent_loop_success(db_session, monkeypatch):
         LLMResult(text="完成"),
     ]
 
-    async def fake_chat(messages, tools, cfg=None, on_delta=None):
+    async def fake_chat(messages, tools, cfg=None, on_delta=None, **kwargs):
         return replies.pop(0)
 
     monkeypatch.setattr("app.agent.llm.chat", fake_chat)
@@ -99,7 +99,7 @@ def test_agent_loop_circuit_breaker(db_session, monkeypatch):
     monkeypatch.setattr("app.tools.weather.httpx.Client", lambda timeout: FakeWeatherClient())
     monkeypatch.setattr(settings, "max_steps", 2)
 
-    async def always_tool(messages, tools, cfg=None, on_delta=None):
+    async def always_tool(messages, tools, cfg=None, on_delta=None, **kwargs):
         return LLMResult(tool_call=ToolCall("get_weather", {"city": "北京"}))
 
     monkeypatch.setattr("app.agent.llm.chat", always_tool)
@@ -116,7 +116,7 @@ def test_agent_loop_llm_error_not_persisted(db_session, monkeypatch):
     db = db_session()
     user, conv = _new_conv(db, "agent_err")
 
-    async def err_chat(messages, tools, cfg=None, on_delta=None):
+    async def err_chat(messages, tools, cfg=None, on_delta=None, **kwargs):
         return LLMResult(text="LLM 调用出错: boom", error=True)
 
     monkeypatch.setattr("app.agent.llm.chat", err_chat)

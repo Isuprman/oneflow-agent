@@ -33,7 +33,7 @@ def test_chat_uses_user_llm_key(client, db_session, monkeypatch):
     user = db.query(User).filter(User.username == "b2llm").first()
     save_llm(db, user.id, "openai", "gpt-4o", "user-key-1", "https://api.example.com/v1")
 
-    async def fake_chat(messages, tools, cfg=None, on_delta=None):
+    async def fake_chat(messages, tools, cfg=None, on_delta=None, **kwargs):
         return LLMResult(text="ok")
 
     monkeypatch.setattr(llm_mod, "chat", fake_chat)

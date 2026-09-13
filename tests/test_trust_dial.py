@@ -71,7 +71,7 @@ def test_ask_all_confirms_even_readonly_tools(db_session, monkeypatch):
     user, conv = _setup(db, "trust_ask_all")
     _set_trust(db, user.id, "ask_all")
 
-    async def fake_chat(messages, tools, cfg=None, on_delta=None):
+    async def fake_chat(messages, tools, cfg=None, on_delta=None, **kwargs):
         return LLMResult(tool_call=ToolCall("calculate", {"expression": "1+1"}))
 
     def boom(name, args, user_, db_, cfg=None):
@@ -102,7 +102,7 @@ def test_standard_runs_readonly_tool_directly(db_session, monkeypatch):
 
     seq = {"n": 0}
 
-    async def fake_chat(messages, tools, cfg=None, on_delta=None):
+    async def fake_chat(messages, tools, cfg=None, on_delta=None, **kwargs):
         seq["n"] += 1
         if seq["n"] == 1:
             return LLMResult(tool_call=ToolCall("calculate", {"expression": "2*3"}))
@@ -122,7 +122,7 @@ def test_standard_write_still_asks_confirmation(db_session, monkeypatch):
     db = db_session()
     user, conv = _setup(db, "trust_std_write")
 
-    async def fake_chat(messages, tools, cfg=None, on_delta=None):
+    async def fake_chat(messages, tools, cfg=None, on_delta=None, **kwargs):
         return LLMResult(tool_call=ToolCall("add_expense", {"amount": 50, "category": "餐饮"}))
 
     monkeypatch.setattr("app.agent.llm.chat", fake_chat)
@@ -147,7 +147,7 @@ def test_auto_executes_plain_write_without_confirm(db_session, monkeypatch):
 
     seq = {"n": 0}
 
-    async def fake_chat(messages, tools, cfg=None, on_delta=None):
+    async def fake_chat(messages, tools, cfg=None, on_delta=None, **kwargs):
         seq["n"] += 1
         if seq["n"] == 1:
             return LLMResult(tool_call=ToolCall("add_expense", {"amount": 66, "category": "交通"}))
@@ -176,7 +176,7 @@ def test_auto_still_confirms_destructive_high_risk(db_session, monkeypatch):
     db.commit()
     _set_trust(db, user.id, "auto")
 
-    async def fake_chat(messages, tools, cfg=None, on_delta=None):
+    async def fake_chat(messages, tools, cfg=None, on_delta=None, **kwargs):
         return LLMResult(tool_call=ToolCall("delete_custom_agent", {"name": "researcher"}))
 
     monkeypatch.setattr("app.agent.llm.chat", fake_chat)
