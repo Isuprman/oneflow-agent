@@ -139,3 +139,61 @@ def test_api_memories_unauthorized_401(client):
     assert resp.status_code == 401
     resp = client.delete("/api/memories/1")
     assert resp.status_code == 401
+
+
+# ---------- /api/memories PUT（编辑 + 重嵌） ----------
+def test_api_update_memory_reembeds(client, db_session, monkeypatch):
+    client.post("/api/auth/register", json={"username": "mem_edit", "password": "secret123"})
+    db = db_session()
+    user = db.query(User).filter(User.username == "mem_edit").first()
+    mem = UserMemory(user_id=user.id, content="旧内容", embedding='{"old": true}')
+    db.add(mem)
+    db.commit()
+    db.refresh(mem)
+    mem_id = mem.id
+    db.close()
+
+    # 编辑必须同步重嵌：patch _embed_text 验证被调用且新向量落库
+    monkeypatch.setattr("app.tools.memory._embed_text", lambda text, cfg: f'{{"vec": "{text}"}}')
+    headers = _register_login(client, "mem_edit")
+    resp = client.put(f"/api/memories/{mem_id}", json={"content": "用户喜欢喝红茶"}, headers=headers)
+    assert resp.status_code == 200
+    assert resp.json()["content"] == "用户喜欢喝红茶"
+
+    db = db_session()
+    row = db.query(UserMemory).filter(UserMemory.id == mem_id).first()
+    assert row.content == "用户喜欢喝红茶"
+    assert row.embedding == '{"vec": "用户喜欢喝红茶"}'
+    db.close()
+
+
+def test_api_update_memory_empty_content_400(client, db_session):
+    client.post("/api/auth/register", json={"username": "mem_blank", "password": "secret123"})
+    db = db_session()
+    user = db.query(User).filter(User.username == "mem_blank").first()
+    mem = UserMemory(user_id=user.id, content="原有内容")
+    db.add(mem)
+    db.commit()
+    db.refresh(mem)
+    mem_id = mem.id
+    db.close()
+
+    headers = _register_login(client, "mem_blank")
+    resp = client.put(f"/api/memories/{mem_id}", json={"content": "   "}, headers=headers)
+    assert resp.status_code == 400
+
+
+def test_api_update_other_user_memory_404(client, db_session):
+    client.post("/api/auth/register", json={"username": "edit_owner", "password": "secret123"})
+    db = db_session()
+    owner = db.query(User).filter(User.username == "edit_owner").first()
+    mem = UserMemory(user_id=owner.id, content="他人的记忆")
+    db.add(mem)
+    db.commit()
+    db.refresh(mem)
+    mem_id = mem.id
+    db.close()
+
+    headers = _register_login(client, "edit_intruder")
+    resp = client.put(f"/api/memories/{mem_id}", json={"content": "篡改"}, headers=headers)
+    assert resp.status_code == 404

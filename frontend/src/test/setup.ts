@@ -18,3 +18,8 @@ if (typeof globalThis.localStorage === 'undefined') {
 
 // React 18：act() 需要显式声明测试环境（RTL 未启 globals 时不会自动设置）
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
+
+// 未启 globals 时 RTL 不自动注册 cleanup，手动挂载保证用例间 DOM 隔离
+import { afterEach } from 'vitest'
+import { cleanup } from '@testing-library/react'
+afterEach(cleanup)

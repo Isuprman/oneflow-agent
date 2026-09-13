@@ -17,3 +17,12 @@ export async function deleteMemory(id: number): Promise<void> {
     throw new Error(getErrorMessage(error), { cause: error })
   }
 }
+
+/** 编辑一条记忆（后端会同步重嵌向量，无 embedding 配置时退化为最近度召回）。 */
+export async function updateMemory(id: number, content: string): Promise<void> {
+  try {
+    await http.put(`/memories/${id}`, { content })
+  } catch (error) {
+    throw new Error(getErrorMessage(error), { cause: error })
+  }
+}
