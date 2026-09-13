@@ -309,6 +309,10 @@ class KnowledgeDoc(Base):
     error = Column(Text)
     size = Column(Integer, default=0)
     chunk_count = Column(Integer, default=0)
+    created_at = Column(DateTime, default=now)
+    updated_at = Column(DateTime, default=now, onupdate=now)
+
+
 class LongTermPlan(Base):
     """长程任务规划：跨会话的大目标，拆成一串带状态的步骤。
 
@@ -335,6 +339,8 @@ class KnowledgeChunk(Base):
     idx = Column(Integer, nullable=False, default=0)
     content = Column(Text, nullable=False)
     embedding = Column(Text)  # JSON 向量
+
+
 class PlanStep(Base):
     """计划步骤：todo / doing / done / blocked；note 记录最近一次推进的产出摘要。"""
     __tablename__ = "plan_steps"
@@ -344,3 +350,21 @@ class PlanStep(Base):
     description = Column(Text, nullable=False)
     status = Column(String(16), default="todo", nullable=False)
     note = Column(Text)
+
+
+class SkillChain(Base):
+    """技能链：把一组指令固化成 agent 可自主调用的组合动作。
+
+    steps 为 JSON 数组（每步一条指令模板），支持 {{上一步}} 插值注入上一步回复
+    （纯文本替换，绝不 eval）。与情境剧本的分工：剧本由用户触发并播报；
+    技能链由 agent 判断调用，结果进对话上下文。
+    """
+    __tablename__ = "skill_chains"
+    __table_args__ = (UniqueConstraint("user_id", "name", name="uq_skill_chain_user_name"),)
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    name = Column(String(64), nullable=False)
+    description = Column(Text, default="")
+    steps = Column(Text, nullable=False)  # JSON: ["指令1", "指令2 {{上一步}}", ...]
+    enabled = Column(Integer, default=1)
+    created_at = Column(DateTime, default=now)
